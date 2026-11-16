@@ -179,8 +179,12 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
   types (no SQLite pragmas, JSON in Text columns) and the migration
   DDL is valid on both dialects. Engine: `pool_pre_ping=True` on
   Postgres so idle-timeout connections recycle instead of failing a
-  request. `render.yaml` wires a managed Postgres database service
-  (`mmsn-db`) into the backend; deleting that service and its env
+  request. In production the Postgres URL comes from the deployment:
+  `docker-compose.yml` wires the `db` container into the backend
+  (Option A, Oracle VM), or a free Neon Postgres URL is pasted in
+  (Option B). The old `render.yaml` managed Postgres service
+  (`mmsn-db`) was removed in the free-tier change (2026-11-16) —
+  Render's free Postgres expires after 30 days. Deleting the Postgres
   wiring falls back to SQLite (the code default).
 
 ## 6. Data model
@@ -232,8 +236,11 @@ are added to existing dev databases by the migration in
 - No payments, no publishing to YouTube/TikTok, no scheduling.
 - ~~No Redis/Celery, no S3, no Postgres in dev, no Docker yet.~~
   **DONE in Phase 3 (2026-11-16, config-gated — all off by default):**
-  Postgres via `DATABASE_URL` (same models, psycopg v3 driver, managed
-  `mmsn-db` service in `render.yaml`); S3-compatible storage via
+  Postgres via `DATABASE_URL` (same models, psycopg v3 driver — in
+  production from the `db` container in `docker-compose.yml`, or a
+  free Neon URL; the old managed `mmsn-db` service in `render.yaml`
+  was removed in the free-tier change because Render's free Postgres
+  expires after 30 days); S3-compatible storage via
   `STORAGE_BACKEND=s3` (`backend/app/storage.py`, presigned downloads,
   local cache for FFmpeg); Celery + Redis workers via
   `CELERY_BROKER_URL` (`backend/app/celery_app.py`, DB rows are the
