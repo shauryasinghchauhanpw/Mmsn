@@ -1,0 +1,44 @@
+# Render blueprint — deploys backend + frontend from this repo.
+# In the Render dashboard: New → Blueprint → pick the Mmsn repo.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: mmsn-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: standard
+    # ^ Deliberately a PAID plan. Free tiers do not have enough RAM/CPU
+    # for Whisper + FFmpeg on real videos — see DEPLOYMENT.md. A free
+    # instance may boot and serve the dashboard, but processing a video
+    # longer than a minute or two will be very slow or run out of memory.
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///./mmsn.db
+      - key: WHISPER_MODEL
+        value: tiny
+      - key: WHISPER_DEVICE
+        value: cpu
+      - key: WHISPER_COMPUTE_TYPE
+        value: int8
+      - key: CLIPS_PER_PROJECT
+        value: "3"
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://mmsn-frontend.onrender.com
+    healthCheckPath: /health
+    disk:
+      name: mmsn-media
+      mountPath: /app/media
+      sizeGB: 10
+
+  - type: web
+    name: mmsn-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile
+    plan: free
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://mmsn-backend.onrender.com
