@@ -19,7 +19,11 @@ with burned-in word captions.
 > Render free remains a **demo-only** blueprint (`render.yaml`) — it
 > boots but cannot run Whisper on 512 MB. See `FREE_TIER.md` for the
 > research and honest limits, and `DEPLOYMENT.md` for the phone
-> tap-by-tap steps. Still missing: no payments, no publishing, no live
+> tap-by-tap steps. Also evaluated in `FREE_TIER.md`: **GitHub Pages
+> cannot host this app** (static-only, and its terms forbid running a
+> commercial SaaS on it), and **Coolify/Dokploy on the same Oracle VM
+> is $0 total** but not the default — direct Docker Compose is simpler
+> for one app. Still missing: no payments, no publishing, no live
 > cloud deploy yet (Docker builds and all live deploys are untested —
 > no daemon/account here; see `DEPLOYMENT.md`). Be honest about that —
 > see `ARCHITECTURE.md` §7 for the full gap list.

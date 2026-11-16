@@ -89,6 +89,14 @@ few minutes for it to resolve.
    edit `.env` in `~/mmsn` (`CORS_ORIGINS=https://YOUR-APP.vercel.app`),
    then restart the backend: `docker compose restart backend`.
 
+> **Do not use GitHub Pages for the frontend.** Pages is static-only
+> (our frontend is a Next.js Node-server build with dynamic routes),
+> and GitHub's terms forbid using Pages to run a commercial SaaS — this
+> project is one by design, and its sign-in page collects passwords,
+> which Pages must not be used for. Vercel Hobby is the $0 frontend.
+> Pages could only host a static landing page *about* the project.
+> Full reasoning: `FREE_TIER.md`.
+
 ### What "Live" looks like — how to know it worked
 
 - `https://clipper.example.com/health` shows `{"status":"ok",…}`.
@@ -108,6 +116,18 @@ few minutes for it to resolve.
   try another availability domain.
 - **Vercel Hobby is non-commercial:** the moment the app earns money
   (ads, payments, paid plans), Vercel requires Pro ($20/mo/seat).
+
+### Option A alternative — Coolify (not recommended for one app)
+
+Coolify is a free, open-source dashboard that turns git pushes into live
+apps with HTTPS and databases — and on the Oracle free VM the combination
+is $0 in total. It is a legitimate alternative, but **not the default
+for this project**: it adds a dashboard to secure and update, ~0.5–1 GB
+RAM overhead, and more setup steps than the one-command
+`scripts/oracle-setup.sh`, while the hard parts (Oracle account, VM,
+domain, ports) stay exactly the same. Use it only if you later host
+several apps on the one VM or want click-to-deploy instead of SSH
+commands. Full evaluation, including Dokploy, is in `FREE_TIER.md`.
 
 ## Option B (demo only, $0) — Render free
 
