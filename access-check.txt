@@ -1,1 +1,0 @@
-Muse access check — this file proves Muse can write to Mmsn. It will be removed after the check.
