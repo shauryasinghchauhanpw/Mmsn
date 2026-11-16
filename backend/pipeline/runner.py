@@ -95,7 +95,7 @@ def run_pipeline(job_id: int, project_id: int, session_factory):
         if settings.openai_api_key:
             llm_config = (settings.openai_api_key,
                           settings.openai_base_url, settings.openai_model)
-        highlights = detect_highlights(
+        highlights, scorer = detect_highlights(
             result["segments"], count=settings.clips_per_project,
             min_s=settings.clip_min_seconds,
             max_s=settings.clip_max_seconds, llm_config=llm_config)
@@ -116,6 +116,7 @@ def run_pipeline(job_id: int, project_id: int, session_factory):
             start, end = snap_to_scene(h["start_sec"], h["end_sec"], scenes)
             hl = Highlight(project_id=project_id, start_sec=start,
                            end_sec=end, score=h["score"],
+                           scorer=scorer,
                            reasons_json=json.dumps(h["reasons"]),
                            title=h["title"], description=h["description"],
                            hashtags_json=json.dumps(h["hashtags"]))

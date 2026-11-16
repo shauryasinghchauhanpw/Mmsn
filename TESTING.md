@@ -80,3 +80,326 @@ Node v24.22.1, ~1.5 shared CPUs, ~650 MB free RAM at test time.
 - yt-dlp — deliberately not tested with any download (per the testing rule).
 - Real talking-head video with a face (face-following path), long videos
   (>10 min), concurrent jobs, and phone-browser usage.
+
+---
+
+# Phase 2, step 1 — real authentication (2026-11-16)
+
+**What changed:** fastapi-users 15.0.0 wired in (`backend/app/auth.py`),
+`User` gained `hashed_password`/`is_active`/`is_superuser`/`is_verified`,
+every `/api/*` route requires a JWT and is scoped to the signed-in user
+(other users' resources return 404), the Phase 1 `get_or_create_dev_user`
+is deleted, frontend got `/login` + `/register` pages, a header auth guard
+with sign-out, and token-authenticated clip downloads (fetch + blob URL).
+Tested live against the real server on :8000 with real HTTP calls
+(`httpx` script; no mocks). **No YouTube video was downloaded.**
+
+## Migration (dev DB)
+
+The existing `./mmsn.db` (Phase 1 schema) was migrated **in place** on
+server startup — `ALTER TABLE users ADD COLUMN` for the four new columns
+(log line: `Auth migration: added missing columns to users:
+hashed_password, is_active, is_superuser, is_verified`). No data was
+dropped. Consequence, verified: the old `dev@localhost` row has
+`hashed_password = NULL` and can never log in, so its 2 Phase 1 test
+projects (ids 1–2), 2 jobs and 4 clips are invisible to every real account
+(Alice and Bob both got 404 for project 1, clip 1, job 1). The rows still
+exist in the DB and the clip files are still on disk under `media/`.
+
+## Results — auth (37/40 checks passed in the final run)
+
+The 3 "failures" in the second run were re-run artefacts: Alice's
+registration returned 400 `REGISTER_USER_ALREADY_EXISTS` because the
+first run had already created her — the first run recorded register → 201.
+All other checks passed in both runs.
+
+| Check | Result |
+|---|---|
+| Unauthenticated `GET /api/projects`, `GET /api/projects/1`, `POST /api/projects/1/process`, `GET /api/jobs/1`, `GET /api/projects/1/clips`, `/highlights`, `/transcript`, `GET /api/clips/1/download`, `POST /api/projects/youtube`, `GET /users/me` | ✅ PASS — all 10 returned **401** |
+| `POST /auth/register` alice@example.com / `<local-test-password>` | ✅ PASS — **201**, `{"id":2,"email":"alice@example.com","name":"Alice","is_active":true,"is_superuser":false,"is_verified":false}` |
+| Duplicate register (same email) | ✅ PASS — **400** `REGISTER_USER_ALREADY_EXISTS` |
+| Register with 3-char password | ✅ PASS — **400** (min-8 policy) |
+| Login with wrong password | ✅ PASS — rejected, **400** `LOGIN_BAD_CREDENTIALS`. Note: fastapi-users returns 400, not 401, for bad credentials — that is its documented behaviour, not a bug. |
+| `POST /auth/jwt/login` correct password | ✅ PASS — **200**, JWT returned (157 chars, HS256) |
+| `GET /users/me` with token | ✅ PASS — **200**, `alice@example.com` |
+| `GET /api/projects` as Alice | ✅ PASS — **200**, `[]` (old dev projects not visible) |
+| `POST /api/projects/upload` as Alice (same local FFmpeg test video) | ✅ PASS — **201**, project id 3, `duration_sec: 69.866667` |
+| `POST /api/projects/youtube` as Alice, no API key | ✅ PASS — **501** `youtube_api_not_configured` (auth passed, then the not-configured path) |
+| `POST /auth/register` bob@example.com | ✅ PASS — **201** |
+| Bob `GET` Alice's project 3 | ✅ PASS — **404** |
+| Bob `GET /api/projects` | ✅ PASS — **200**, `[]` (Alice's project absent) |
+| Bob `POST /api/projects/3/process` | ✅ PASS — **404** |
+| Bob `GET /api/projects/3/clips`, `/highlights`, `/transcript` | ✅ PASS — **404** on all three |
+| Bob `GET /api/jobs/3` (Alice's job) | ✅ PASS — **404** |
+| Alice `POST /api/projects/3/process` + `GET /api/jobs/3` | ✅ PASS — **202** then **200** |
+| Full pipeline as Alice (job 3) | ✅ PASS — `done`, 100%, ~80 s of polling (warm model cache), 2 clips (ids 5, 6) |
+| Alice `GET /api/projects/3/clips` / `/transcript` / `/highlights` | ✅ PASS — **200**, 2 clips, transcript ~1156 chars, 2 highlights |
+| Alice `GET /api/clips/5/download` | ✅ PASS — **200**, **1,743,977 bytes**, `video/mp4` (byte count matches the Phase 1 clip of the same source video) |
+| Bob `GET /api/clips/5/download` (Alice's clip) | ✅ PASS — **404** |
+| Seed flow: restart with `SEED_EMAIL`/`SEED_PASSWORD` set | ✅ PASS — log `Seed user created (dev only): seed@example.com (id=4)`, login **200**; wrong password **400** |
+| Restart without seed vars | ✅ PASS — no seed line in log, no user auto-created; seed user still logs in (**200**) |
+
+## Bugs found by testing (both fixed)
+
+1. **`UserManager.parse_id` missing** — fastapi-users' default raises
+   `NotImplementedError`, so every authenticated request (`GET /users/me`,
+   any `/api/*` call with a token) returned 500. Fixed by overriding
+   `parse_id` in `backend/app/auth.py` (`int(value)` — JWT `sub` is a
+   string, user ids are ints). Login itself worked before the fix (it
+   does not call `parse_id`); token *use* did not.
+2. **Seed crashed startup** — `UserManager.get_by_email` raises
+   `UserNotExists` instead of returning `None` when the user is missing,
+   so the first seed attempt killed the server at startup. Fixed by
+   catching `UserNotExists` in `seed_user_if_configured()`.
+
+## Frontend
+
+| Check | Result |
+|---|---|
+| `npm run build` | ✅ PASS — "Compiled successfully", 6 routes (`/`, `/login`, `/register`, `/projects/[id]`, `/clips/[id]`, `/_not-found`), First Load JS ~97 kB |
+| Login/register pages, auth guard, sign-out, dashboard email, authenticated clip download/preview in a real browser | ⚠️ **NOT TESTED** — no live browser is available in this environment. The build passes and the pages are wired to the real API (token in localStorage, `Authorization: Bearer` on every call, blob-URL clip fetch because `<video src>`/`<a href>` cannot send headers), but the phone-browser sign-up → upload → download flow still needs a live check by the parent agent. |
+
+## Test accounts left in the dev DB
+
+`alice@example.com` / `<local-test-password>` (id 2, project 3, job 3, clips 5–6),
+`bob@example.com` / `<local-test-password>` (id 3),
+`seed@example.com` / `<local-test-password>` (id 4). The exact passwords
+were redacted from this file before pushing to GitHub (they were
+throwaway local-only passwords; the dev DB is not in the repo). These are throwaway local-test
+accounts in the gitignored dev DB only — delete them (and project 3's rows
+and files) before any shared/demo use, and never reuse these passwords.
+
+---
+
+# Phase 2, step 2 — working video editor (2026-11-16)
+
+**What changed:** new editor endpoints (`GET /api/clips/{id}`,
+`GET /api/clips/{id}/captions`, `POST /api/clips/{id}/re-render`,
+`POST /api/clips/{id}/regenerate`, `POST`+`GET /api/clips/{id}/thumbnail`),
+4 real ASS subtitle styles, versioned re-renders via a `kind="rerender"`
+background job (`backend/pipeline/rerender.py`), and a rewritten editor
+page (draggable trim region via the wavesurfer.js Regions plugin,
+caption editor, style picker, framing + volume sliders, job polling).
+Clip model gained `edit_params_json` / `version` / `thumbnail_path`,
+jobs gained `clip_id`; the dev DB was migrated in place on startup
+(log: `Migration: added missing columns to clips: edit_params_json,
+version, thumbnail_path` and `... to jobs: clip_id`). Tested live against
+the real server on :8000 with real HTTP calls (httpx scripts) and real
+FFmpeg output. **No YouTube video was downloaded.** No OCR tool was
+available (no `tesseract` binary), so caption visibility was verified by
+reading extracted frames as images, not by OCR — stated as the method
+below.
+
+## Results — endpoints, validation, auth (27/27 checks passed)
+
+Run against Alice's clip 5 (project 3, highlight 0.00–28.62 s, v1, 28.63 s).
+
+| Check | Result |
+|---|---|
+| `GET /api/clips/5` | ✅ PASS — 200, highlight window 0.0–28.62 s, `version: 1`, `edit_params: {}`, `has_thumbnail: false` |
+| `GET /api/clips/5/captions` | ✅ PASS — 200, style `karaoke`, **29 groups**, window 0.00–28.62 s; group 0 `0.00–1.04 ' Hello everyone,'` |
+| Bob `GET /api/clips/5`, `/captions`, `POST re-render`, `POST regenerate`, `POST thumbnail?t=3`, `GET thumbnail` | ✅ PASS — **404** on all six |
+| Anonymous (no token) on the same six | ✅ PASS — **401** on all six |
+| Bad style `{"style":"nope"}` | ✅ PASS — **400** `Unknown subtitle style 'nope'. Choose one of: bold, highlighted, karaoke, minimal.` |
+| `trim_end: 99` (> window) | ✅ PASS — **400** |
+| Trim 10–11 s (< 2 s) and 5–5 s | ✅ PASS — **400** on both |
+| `volume: 3.0` / `framing_offset: 2` | ✅ PASS — **422** (pydantic range) on both |
+| Re-render missing clip 9999 | ✅ PASS — **404** |
+| `GET thumbnail` before any is set; `POST thumbnail?t=999` | ✅ PASS — **404** and **400** |
+
+## Results — re-renders (29/29 checks passed, then 14/14 re-test checks)
+
+Clip 5 was edited step by step (each step builds on the stored params of
+the previous one); clip 7 (new talking-head project 4, see below) for
+framing. Every re-render was a real background job polled to `done`.
+
+| Check | Result |
+|---|---|
+| Trim `0–15 s` re-render | ✅ PASS — job done, **version 2**, `ffprobe` duration **15.00 s** (was 28.63 s), clip row duration 15.0 s, file `clip_5_v2.mp4`, old v1 file deleted |
+| Caption edit: group 0 → `HELLO EDITED WORDS` | ✅ PASS — job done, **version 3**, duration still 15.00 s; edited text present in the ASS rebuilt exactly as the renderer builds it, old text `Hello everyone,` absent; frame at 0.5 s read visually: **"HELLO EDITED WORDS welcome"** with EDITED highlighted yellow — the extra "welcome" was the regrouping bug (fixed below), verified by eye, not OCR |
+| Style change to `bold` | ✅ PASS — job done, **version 4**, stored style `bold`; ASS Style lines differ (`Arial,72,…,Outline 4` vs `Arial,88,…,Outline 5, Shadow 2`); frame at t=5 s differs (md5 `04d742e7` vs `198b041f`); read visually: same text "secret about how to", visibly larger/bolder in the bold frame |
+| Volume `0.5` | ✅ PASS — job done, **version 5**; `ffmpeg volumedetect`: mean **−15.8 dB → −21.9 dB** (drop **6.10 dB**, expected −6.02 dB for 0.5×), max −4.6 → −10.7 dB |
+| Thumbnail `POST ?t=3` + `GET` | ✅ PASS — 200, `{"clip_id":5,"t":3.0,"thumbnail_url":"/api/clips/5/thumbnail"}`; GET 200 `image/jpeg`, **72,507 bytes**; `has_thumbnail: true` |
+| Regenerate (stored params) | ✅ PASS — 202, job done, **version 6**, params kept (`bold`, volume 0.5, trim 0–15, override intact), duration still 15.00 s |
+| Download after all versions | ✅ PASS — 200, **1,035,507 bytes** |
+
+## Results — framing + regression (first run 7/14, re-test 14/14)
+
+Talking-head project 4 (upload of `test_media/test_talking_head.mp4` as
+Alice → process job 9 done in **91 s**, 2 clips, transcript 1156 chars)
+is the Phase 1 flow regression: upload/process/clips/transcript all ✅.
+
+| Check | Result |
+|---|---|
+| Face in talking-head window | ❌ **0/58 YuNet samples found a face** — see note below |
+| Framing re-render `offset +0.9` (first run) | ❌ **FAILED** — `Render failed: Clip render failed: [AVFilterGraph] No such filter: '0)'` — the unescaped-comma bug in `vertical_filter()` (Phase 1 latent bug, see ARCHITECTURE.md §9). Clip stayed at v1 with the old file intact (failure handling worked as designed: job failed, clip status back to `ready`) |
+| Framing re-render `offset +0.9` (after fix) | ✅ PASS — job 11 done, **version 2**; frame at t=5 differs (md5 `70d651ae` vs `bda6b315`), mean abs pixel diff **148.04** (0–255 scale) |
+| Synthetic face track through `render_clip()` (median 0.25, offset 0 vs +0.5) | ✅ PASS — both renders succeed; frames differ (md5 `934acc24` vs `c248ca0c`), mean abs pixel diff **130.00**; face-track render also differs from plain centre crop (mean abs diff **139.27**) |
+| Regenerate clip 5 after the caption-grouping fix | ✅ PASS — job done, **version 7**; groups rebuilt as `['HELLO EDITED WORDS', ' welcome back to the', ' channel.']`; frame at 0.5 s read visually: exactly **"HELLO EDITED WORDS"**, EDITED highlighted yellow, no stray "welcome" |
+
+**Note on the talking-head video:** `test_media/test_talking_head.mp4`
+contains **no face at all** — the frame at t=5 is the same FFmpeg
+`testsrc` colour-bar pattern as the Phase 1 test video, with captions.
+YuNet finding 0 faces in 58 samples is correct, not a detector failure.
+Consequences: the face-*tracked* framing path could only be verified
+with a synthetic face track (above), not with a real detected face;
+face-following on a real talking-head video is **still unverified** and
+needs a video with an actual face. The API-level framing test verified
+the centre+nudge fallback (offset +0.9 moves the crop), and the
+synthetic-track test verified the median+nudge math through real FFmpeg.
+
+## Bugs found by testing (both fixed, both re-verified)
+
+1. **Unescaped commas in the face-track crop filter** (`backend/pipeline/
+   reframe.py`) — `crop=…:min(max(…,0),iw-…)` failed FFmpeg parsing
+   (`No such filter: '0)'`). Latent since Phase 1: no face was ever
+   tracked in testing, so the branch never ran. Fixed by escaping commas
+   (`\,`); verified by direct FFmpeg crop (centre vs right-edge mean abs
+   diff 149.5), the API framing re-test, and synthetic face-track renders.
+2. **Caption edit absorbed a neighbouring word** — re-grouping the flat
+   word list after an override pulled "welcome" into the edited group
+   ("HELLO EDITED WORDS welcome"). Fixed with a `_new_group` boundary
+   flag in `apply_caption_overrides()` / `group_words()`; re-verified by
+   ASS rebuild + frame (exactly "HELLO EDITED WORDS").
+
+## Frontend
+
+| Check | Result |
+|---|---|
+| `npm run build` (after the editor rewrite) | ✅ PASS — "Compiled successfully", 6 routes (`/`, `/login`, `/register`, `/projects/[id]`, `/clips/[id]`, `/_not-found`), editor page 5.42 kB / First Load JS ~100 kB. No new dependency: the Regions plugin ships inside wavesurfer.js 7.9.0. |
+| Editor page in a real browser (drag region, inputs, sliders, Apply polling, thumbnail button) | ⚠️ **NOT TESTED** — no live browser is available in this environment. The build passes, the API it calls is verified live above, and the page is wired to the real API (token in localStorage, blob-URL video/thumbnail), but the phone-browser interaction still needs a live check by the parent agent. |
+
+## Test state left in the dev DB
+
+Alice's project 3, clip 5 is now at **version 7** (`clip_5_v7.mp4`,
+15.00 s, bold style, volume 0.5×, trim 0–15 s, group-0 override
+"HELLO EDITED WORDS", thumbnail set from t=3 s). Project 4
+(talking-head upload, Alice) has clips 7 (v2, framing +0.9) and 8 (v1).
+Jobs 9–12 are the process/re-render jobs from this session. Test
+scripts are in `/tmp/test_editor_smoke.py`, `/tmp/test_editor_render.py`,
+`/tmp/test_editor_framing.py`, `/tmp/test_editor_retest.py` (not in the
+repo — rerun them against a live server to reproduce).
+
+---
+
+# Phase 2, step 3 — LLM scoring verification + full re-test (2026-11-16)
+
+**What changed:** `detect_highlights()` / `score_highlights_llm()` now
+return `(highlights, scorer)`; `Highlight` gained a `scorer` column
+(`"llm"` | `"heuristic"`, default `"heuristic"`, added by the same
+add-only migration in `backend/app/database.py` — startup log:
+`Migration: added missing columns to highlights: scorer`); `runner.py`
+stores the scorer that actually ran; `HighlightOut` exposes it; the
+frontend shows **"Scored by: LLM" / "Scored by: Heuristic"** next to
+each clip's virality score on the project page and in the editor's Clip
+info (from `GET /api/projects/{id}/highlights`). The UI can never claim
+LLM scoring when the heuristic ran — it prints the stored value
+verbatim. **No real OpenAI key exists and none was used** — LLM
+behaviour below was verified against a local mock server only.
+
+## Results — LLM scoring, local mock (14/14 checks passed)
+
+Script `/tmp/test_llm_mock.py` (not in the repo). A tiny `http.server`
+in the test process implements `POST /chat/completions` and returns a
+canned JSON highlight array; `detect_highlights()` is called on the
+**real transcript segments of project 3** (3 segments, 0–69.4 s,
+209 words, read from the dev DB) with a dummy key and
+`OPENAI_BASE_URL` pointed at the mock.
+
+| Check | Result |
+|---|---|
+| Mock success → scorer `"llm"` | ✅ PASS |
+| Mock success → 2 highlights, titles `MOCK LLM TITLE ONE` / `MOCK LLM TITLE TWO` | ✅ PASS — the mock's picks, not the heuristic's |
+| Mock pick scores 95 / 88 (heuristic would give 81) and window 28.62–57.76 s | ✅ PASS |
+| Mock received the transcript text in its request body (`"Hello everyone"`, `TRANSCRIPT`) and the dummy model name `mock-model` | ✅ PASS — exactly 1 request |
+| Mock returns HTTP 500 → scorer `"heuristic"`, 2 fallback highlights, first reason `"LLM scoring unavailable — heuristic score"`, scores 81 | ✅ PASS |
+| No `llm_config` → scorer `"heuristic"`, same picks as the 500-fallback | ✅ PASS |
+
+**Environment quirk found while testing (not a product bug):** the
+first mock run failed with `httpx.InvalidURL: Invalid port: ':1]'` —
+`httpx` honours this VM's `HTTP(S)_PROXY` / `NO_PROXY` environment
+variables, and the VM's `NO_PROXY` value (which includes `[::1]`)
+breaks httpx's localhost URL handling. The 14/14 run above was done
+with the proxy variables cleared (`env -u http_proxy -u https_proxy
+-u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u NO_PROXY
+-u no_proxy`). Consequence: in *this* VM, any `OPENAI_BASE_URL`
+pointing at localhost would hit the same httpx/proxy failure and fall
+back to the heuristic (with the "LLM scoring unavailable" reason) —
+the fallback path is what makes that safe. On Render/Railway no such
+proxy variables are set, so a real `OPENAI_API_KEY` should call
+`api.openai.com` normally — **still untested with a real key**.
+
+## Results — full re-test on the final code (59/61 as-run, 61/61 after re-check)
+
+Script `/tmp/test_phase2_final.py` (not in the repo), against the live
+server on :8000 with the final code. Test input: a **new** locally
+generated video (`/tmp/final_test_video.mp4`, FFmpeg `testsrc`
+1280×720 30 fps + real spoken English via the `flite` filter, new
+~200-word script, 77.705 s, 2.4 MB). **No YouTube video was downloaded.**
+
+| Check | Result |
+|---|---|
+| Anonymous `GET /api/projects`, `GET /api/clips/5`, `POST /api/projects/3/process`, `GET /users/me`, `GET /api/projects/3/clips`, `GET /api/clips/5/download` | ✅ PASS — all 6 returned **401** |
+| Login with wrong password | ✅ PASS — **400** `LOGIN_BAD_CREDENTIALS` |
+| Bob `GET` Alice's project 3, clip 5, clips/highlights/transcript of project 3, job 3, clip 5 download | ✅ PASS — **404** on all 7 |
+| Bob `POST /api/clips/5/re-render` | ⚠️ **422 as-run, re-verified 404** — see note below |
+| `GET /api/projects/3/highlights` exposes `scorer`; all 8 pre-existing highlights are `"heuristic"` (migration default) | ✅ PASS |
+| Clip 5 state preserved from step 2 | ✅ PASS — still **version 7** |
+| Fresh upload (new video) as Alice | ✅ PASS — **201**, project **5**, `duration_sec: 77.705` |
+| Fresh process (job 13) | ✅ PASS — `done`, **101 s** (warm model cache), **3 clips** (30.00 s, 29.23 s, 18.53 s — a 3rd clip fit this time because the new script has more usable speech) |
+| `ffprobe` on all 3 fresh clips | ✅ PASS — `h264, 1080×1920`, durations match the API |
+| `GET /api/clips/{id}/download` for all 3 | ✅ PASS — **byte-identical** to disk: 2,201,468 / 2,147,479 / 1,315,043 bytes |
+| Fresh highlights | ✅ PASS — scores **89 / 84 / 76**, all `scorer: "heuristic"` (no LLM key set), reasons present |
+| Fresh transcript | ✅ PASS — 3 segments with word timestamps |
+| Editor on fresh clip 9 (v1, 30.00 s): `GET captions` | ✅ PASS — **30 groups** |
+| Trim `0–15 s` re-render | ✅ PASS — job done, **version 2**, `ffprobe` duration **15.00 s** |
+| Caption edit group 0 → `FINAL TEST WORDS` | ✅ PASS — job done, **version 3**, duration still 15.00 s; rebuilt ASS contains FINAL/TEST/WORDS and no "Hello"; frame at 0.5 s read visually: exactly **"FINAL TEST WORDS"** with TEST highlighted yellow (bold style) |
+| Style change to `bold` | ✅ PASS — job done, **version 4**; frame at t=5 differs from the karaoke frame (md5 `1bc3e9b3` vs `decf335a`) |
+| Framing nudge `+0.9` | ✅ PASS — job done, **version 5**; frame at t=5 differs (md5 `decf335a` vs `a7b52899`) |
+| Volume `0.5` | ✅ PASS — job done, **version 6**; `ffmpeg volumedetect`: mean **−18.8 dB → −24.8 dB** (drop **6.0 dB**, expected −6.02 dB for 0.5×) |
+| Thumbnail `POST ?t=3` + `GET` | ✅ PASS — 200, `image/jpeg`, **84,177 bytes** |
+| Regenerate (stored params) | ✅ PASS — job done, **version 7**, params kept (`bold`, volume 0.5, trim 0–15, override intact, framing +0.9) |
+| Bob / anon `POST re-render` on fresh clip 9 | ✅ PASS — **404** / **401** |
+| `npm run build` (frontend, after the scorer-label change) | ✅ PASS — "Compiled successfully", 6 routes (`/`, `/login`, `/register`, `/projects/[id]`, `/clips/[id]`, `/_not-found`), editor page 5.51 kB / First Load JS ~100 kB |
+
+**The 2 as-run FAILs were both test-script artefacts, re-verified
+above — no product bug:**
+
+1. **Bob re-render 422:** the test called `POST /api/clips/5/re-render`
+   with **no body at all**, so FastAPI's body validation (422) fired
+   before the endpoint's ownership check. Re-run with an (empty) JSON
+   body returns **404** for both clip 5 and clip 9, as designed.
+2. **Caption edit "not in rebuilt ASS":** the test looked for the
+   contiguous string `"FINAL TEST WORDS"` in the ASS text, but karaoke
+   mode emits one Dialogue event per word, so the words never appear
+   contiguously. Re-checked properly: the edited word list starts
+   `['FINAL', ' TEST', ' WORDS', ...]`, the ASS contains each word,
+   "Hello" is gone, and the rendered frame shows "FINAL TEST WORDS".
+
+## Test state left in the dev DB
+
+Alice's project **5** (fresh final-test video, 77.705 s) has clips
+9 (**version 7**, 15.00 s, bold, volume 0.5×, trim 0–15 s, group-0
+override "FINAL TEST WORDS", framing +0.9, thumbnail set from t=3 s),
+10 (v1, 29.23 s) and 11 (v1, 18.53 s); job 13 is the process job.
+Project 3 / clip 5 (v7) and project 4 / clips 7–8 are unchanged from
+step 2. Test scripts: `/tmp/test_llm_mock.py`,
+`/tmp/test_phase2_final.py` (not in the repo).
+
+## NOT tested (unchanged from Phase 1/2, plus step-3 notes)
+
+- Docker builds (`backend/Dockerfile`, `frontend/Dockerfile`) and
+  `render.yaml` / Railway deploy — **not run**; no Docker daemon or
+  Render account in this environment. They are provided as-is; the
+  first real deploy will be the test.
+- YouTube Data API with a real key (no key exists yet) — only the
+  not-configured path was tested.
+- **LLM highlight scoring with a real OpenAI key — not tested.** Only
+  the local mock (above) and the heuristic path ran. A real key should
+  work the same way (same `POST /chat/completions` call), but no real
+  call was ever made.
+- yt-dlp — deliberately not tested with any download (per the testing rule).
+- Real talking-head video with a face (face-following path), long videos
+  (>10 min), concurrent jobs, and phone-browser usage — still not tested.
+  The editor / auth / scorer-label UI was verified at the API + build
+  level only; no live browser check exists in this environment.

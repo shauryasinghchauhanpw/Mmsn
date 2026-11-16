@@ -30,17 +30,19 @@ def _escape_filter_path(path: str) -> str:
 
 def _render_segment(source_path: str, start: float, end: float,
                     ass_path: str | None, out_path: str,
-                    center_x: float | None) -> None:
+                    center_x: float | None, volume: float = 1.0) -> None:
     vf = vertical_filter(center_x)
     if ass_path and os.path.exists(ass_path):
         vf += f",ass='{_escape_filter_path(ass_path)}'"
     cmd = ["ffmpeg", "-y", "-v", "error",
            "-ss", str(start), "-to", str(end), "-i", source_path,
-           "-vf", vf,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-           "-pix_fmt", "yuv420p", "-r", "30",
-           "-c:a", "aac", "-b:a", "128k",
-           "-movflags", "+faststart", out_path]
+           "-vf", vf]
+    if volume != 1.0:
+        cmd += ["-af", f"volume={volume}"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", out_path]
     result = run(cmd)
     if result.returncode != 0 or not os.path.exists(out_path):
         raise FFmpegError(
@@ -68,11 +70,24 @@ def _concat_segments(segment_paths: list[str], out_path: str) -> None:
 def render_clip(source_path: str, start: float, end: float,
                 words: list, out_path: str,
                 face_track=None, scenes=None,
-                width: int = 1080, height: int = 1920) -> str:
+                width: int = 1080, height: int = 1920,
+                volume: float = 1.0, style: str = "karaoke",
+                framing_offset: float = 0.0) -> str:
     """Render one vertical clip. `words` are absolute-time word dicts for
     captions; `face_track` is a smoothed [(t, center_x)] list (may be
     empty -> centre crop); `scenes` are (start, end) spans used as
-    segment boundaries. Raises FFmpegError on failure."""
+    segment boundaries. Raises FFmpegError on failure.
+
+    Editor parameters (all optional, defaults keep first-time renders
+    identical to Phase 1):
+      volume         audio multiplier, applied as an FFmpeg `volume`
+                     filter (1.0 = unchanged, filter omitted entirely).
+      style          caption style name, one of captions.CAPTION_STYLES
+                     ("karaoke" default).
+      framing_offset horizontal nudge added to the face-track median
+                     centre, -1..1, clamped to 0..1. With no face track
+                     it nudges the centre crop instead (0.5 + offset).
+    """
     work_dir = os.path.dirname(out_path)
     # Segment boundaries: scene cuts strictly inside the window.
     cuts = sorted({s for s, _ in (scenes or []) if start < s < end})
@@ -88,13 +103,17 @@ def render_clip(source_path: str, start: float, end: float,
         # Median face position inside this segment, or None -> centre crop.
         xs = [x for t, x in track if seg_start <= t < seg_end]
         center_x = statistics.median(xs) if xs else None
+        if framing_offset:
+            # Nudge the crop centre; no face -> nudge from centre (0.5).
+            base = center_x if center_x is not None else 0.5
+            center_x = min(1.0, max(0.0, base + framing_offset))
         ass_path = None
         if words:
             ass_path = os.path.join(work_dir, f".seg{i}.ass")
-            write_ass(words, seg_start, seg_end, ass_path)
+            write_ass(words, seg_start, seg_end, ass_path, style=style)
         seg_path = os.path.join(work_dir, f".seg{i}.mp4")
         _render_segment(source_path, seg_start, seg_end, ass_path,
-                        seg_path, center_x)
+                        seg_path, center_x, volume=volume)
         segment_paths.append(seg_path)
         if ass_path and os.path.exists(ass_path):
             os.remove(ass_path)

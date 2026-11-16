@@ -148,8 +148,10 @@ def score_highlights_heuristic(segments, count=3, min_s=15, max_s=60):
 
 def score_highlights_llm(segments, api_key, base_url, model, count=3,
                          min_s=15, max_s=60):
-    """LLM scorer — transcript text ONLY is sent. Falls back to the
-    heuristic scorer on any failure, and says so in the reasons."""
+    """LLM scorer — transcript text ONLY is sent. Returns
+    (highlights, scorer) where scorer is "llm" on a real LLM response,
+    or "heuristic" when the LLM call fails and the heuristic scorer
+    runs instead (the fallback highlights say so in their reasons)."""
     import httpx
 
     text = "\n".join(
@@ -187,19 +189,23 @@ def score_highlights_llm(segments, api_key, base_url, model, count=3,
                 "hashtags": list(h.get("hashtags", ["#shorts"]))[:6],
             })
         if out:
-            return out
+            return out, "llm"
     except Exception as exc:  # noqa: BLE001 — any LLM failure = heuristic
         logger.warning("LLM scoring failed (%s); using heuristic scorer", exc)
     fallback = score_highlights_heuristic(segments, count, min_s, max_s)
     for h in fallback:
         h["reasons"] = ["LLM scoring unavailable — heuristic score"] + h["reasons"]
-    return fallback
+    return fallback, "heuristic"
 
 
 def detect_highlights(segments, count=3, min_s=15, max_s=60,
                       llm_config=None):
-    """llm_config = (api_key, base_url, model) or None for heuristic."""
+    """llm_config = (api_key, base_url, model) or None for heuristic.
+    Returns (highlights, scorer) where scorer is "llm" only when an LLM
+    response actually produced the highlights, otherwise "heuristic".
+    Callers must record the returned scorer — never claim LLM scoring
+    when the heuristic ran."""
     if llm_config and llm_config[0]:
         return score_highlights_llm(segments, *llm_config, count=count,
                                     min_s=min_s, max_s=max_s)
-    return score_highlights_heuristic(segments, count, min_s, max_s)
+    return score_highlights_heuristic(segments, count, min_s, max_s), "heuristic"

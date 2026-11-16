@@ -135,6 +135,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                     {clip.width}×{clip.height} ·{" "}
                     {formatDuration(clip.duration_sec)}
                     {hl ? ` · Virality ${hl.score}/100` : ""}
+                    {hl ? ` · Scored by: ${hl.scorer === "llm" ? "LLM" : "Heuristic"}` : ""}
                   </p>
                   {hl && hl.reasons.length > 0 && (
                     <p className="mt-1 text-xs text-gray-400">
@@ -148,12 +149,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                     >
                       Open in editor
                     </Link>
-                    <a
-                      href={api.clipDownloadUrl(clip.id)}
+                    <button
+                      onClick={() =>
+                        api
+                          .downloadClip(clip.id, `${clip.title}.mp4`)
+                          .catch((e) => setError(e.message))
+                      }
                       className="rounded-lg bg-amber-500 px-3 py-2 text-sm font-semibold text-black hover:bg-amber-400"
                     >
                       Download MP4
-                    </a>
+                    </button>
                   </div>
                 </li>
               );

@@ -32,9 +32,15 @@ website. Everything below is taps in apps/websites — no terminal, no laptop.
 5. While it builds (a few minutes), tap the **backend service** →
    **Environment** and add these if you have them (all optional):
    - `YOUTUBE_API_KEY` — your YouTube Data API key (see below).
-   - `OPENAI_API_KEY` — only if you want LLM highlight scoring.
+   - `OPENAI_API_KEY` — only if you want LLM highlight scoring
+     (see "LLM scoring" below). You can also set `OPENAI_MODEL`
+     (default `gpt-4o-mini`) — leave `OPENAI_BASE_URL` alone unless
+     you use a different OpenAI-compatible provider.
    Leave them out and the app still works: upload → transcribe → clips,
    with the built-in heuristic scorer.
+   `SECRET_KEY` is **not** optional — Render auto-generates it from
+   `render.yaml` (a random JWT signing secret). If you ever reset it,
+   everyone gets signed out and must sign in again.
 6. Wait for both services to show **Live**. Tap the **frontend** service →
    copy its URL (something like `https://mmsn-frontend.onrender.com`).
 7. **Open that link on your phone.** That is the app. Bookmark it / add it
@@ -57,6 +63,33 @@ website. Everything below is taps in apps/websites — no terminal, no laptop.
 4. Set the same optional env vars as above, plus
    `NEXT_PUBLIC_API_URL` on the frontend service to the backend's public URL.
 5. Open the frontend's public domain on your phone.
+
+## LLM scoring (optional — how it works on the deployed app)
+
+Without a key, every clip is picked by the built-in heuristic scorer
+and the app says **"Scored by: Heuristic"** next to each clip. If you
+add `OPENAI_API_KEY` in the backend's Environment settings (Render
+step 5 above), the pipeline sends **only the transcript text** to
+OpenAI and uses the model's picks instead, and the app says
+**"Scored by: LLM"**. The label always shows which scorer actually
+ran — it can never claim LLM when the heuristic ran.
+
+- **Getting a key (phone):** open
+  [platform.openai.com](https://platform.openai.com) in your phone
+  browser → sign in → **API keys → Create new secret key** → copy it
+  into Render as `OPENAI_API_KEY`. You need a payment method on the
+  OpenAI account (pay-per-use: a few paise/cents per video with
+  `gpt-4o-mini`, billed by OpenAI, not by us). Keep the key secret —
+  anyone with it can spend on your OpenAI account.
+- **If the LLM call fails** (bad key, no credit, OpenAI down), the app
+  does **not** fail the job — it falls back to the heuristic scorer
+  and the clip's reasons say "LLM scoring unavailable". Processing
+  still produces clips.
+- **Not yet tested with a real key:** the LLM path was verified
+  against a local mock server only (see `TESTING.md`). The first
+  real-key run on the deployed app is still unverified — if clips
+  come back labelled "Heuristic" after you add a key, check the
+  backend logs for the "LLM scoring failed" warning.
 
 ## Getting a YouTube Data API key (optional, phone-friendly)
 
@@ -91,6 +124,9 @@ memory limit, not a bug in the app.
 
 ## Using the app from your phone
 
+- **First visit:** tap "Create one" on the sign-in page and make an
+  account (email + password, 8+ characters). Your projects belong to that
+  account — nobody else can see them. Signing out is in the header.
 - **Upload a video:** tap "Choose video file" → pick a video from your
   phone's gallery/files. Uploads from a phone work, but a big video on
   mobile data will be slow — use Wi-Fi for anything over a few minutes.
@@ -99,6 +135,16 @@ memory limit, not a bug in the app.
   To make clips, upload the video file.
 - **Downloading clips:** tap "Download MP4" on a clip — it saves to your
   phone like any downloaded video, then share it to Shorts/Reels/TikTok.
+- **Editing a clip:** tap "Open in editor" on a clip. Drag the orange
+  region on the waveform (or type the times) to trim; tap a caption
+  group to reword it; pick a subtitle style (Karaoke / Minimal / Bold /
+  Highlighted); use the Framing slider to nudge the 9:16 crop sideways
+  and the Volume slider for loudness; then tap "Apply & re-render" and
+  wait for the new version. Pause the video on the frame you want and
+  tap "Set thumbnail from current frame" to pick a thumbnail. There is
+  no live preview of the framing crop — it only moves in the re-rendered
+  file. Each clip also shows "Scored by: LLM / Heuristic" so you know
+  how its moment was picked.
 - **Costs to you:** the app itself is free/open source. You pay the host
   (Render/Railway) if you go beyond their free tier, and optionally OpenAI
   if you add an LLM key. The YouTube Data API is free within its quota.

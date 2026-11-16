@@ -5,6 +5,12 @@ pydantic==2.10.4
 python-multipart==0.0.20
 python-dotenv==1.2.4
 httpx==0.28.1
+# Auth (Phase 2, step 1): fastapi-users 15.0.0 with JWT bearer tokens.
+# NOTE: fastapi-users 15 ships an async-only SQLAlchemy adapter, but this
+# app uses sync SQLAlchemy sessions — see backend/app/auth.py for the thin
+# sync adapter used instead. The [sqlalchemy] extra is still declared so
+# the evaluated dependency set matches research.
+fastapi-users[sqlalchemy]==15.0.0
 # Transcription (CPU). faster-whisper 1.2.1 + PyAV pin (av>=19 broke it, Oct 2026).
 faster-whisper==1.2.1
 av<19

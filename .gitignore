@@ -1,0 +1,43 @@
+# Secrets & local config
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+
+# User media & generated files — never commit these
+uploads/
+media/
+mmsn.db
+*.db
+*.db-journal
+test_media/
+models/
+*.ass
+!frontend/**/*.ass
+
+# Build outputs
+dist/
+build/
+.next/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

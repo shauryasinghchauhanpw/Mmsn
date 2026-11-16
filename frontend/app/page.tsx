@@ -10,6 +10,7 @@ export default function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = () => {
@@ -17,6 +18,7 @@ export default function Dashboard() {
       .listProjects()
       .then(setProjects)
       .catch((e) => setError(e.message));
+    api.getMe().then((me) => setEmail(me.email)).catch(() => {});
   };
 
   useEffect(refresh, []);
@@ -66,6 +68,12 @@ export default function Dashboard() {
           Upload your own video — the AI transcribes it, finds the best
           moments, and renders vertical 1080×1920 clips with captions.
         </p>
+        {email && (
+          <p className="mt-2 text-xs text-gray-500">
+            Signed in as <span className="text-gray-300">{email}</span> —
+            only you can see these projects.
+          </p>
+        )}
       </section>
 
       {error && (

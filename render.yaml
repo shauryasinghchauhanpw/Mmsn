@@ -14,6 +14,11 @@ services:
     envVars:
       - key: DATABASE_URL
         value: sqlite:///./mmsn.db
+      # REQUIRED (Phase 2, step 1): JWT signing secret. Render generates a
+      # random value on first apply — do not put a real secret in the repo.
+      # The backend refuses to start without a secret of >= 32 chars.
+      - key: SECRET_KEY
+        generateValue: true
       - key: WHISPER_MODEL
         value: tiny
       - key: WHISPER_DEVICE

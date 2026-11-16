@@ -56,6 +56,22 @@ class Settings:
     openai_model: str = field(default_factory=lambda: os.environ.get(
         "OPENAI_MODEL", "gpt-4o-mini"))
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
+    # Auth (Phase 2, step 1): JWT secret. SECRET_KEY is the primary name;
+    # AUTH_SECRET is accepted as an alias. Must be a long random string —
+    # auth.py refuses to start with a missing/short one. Never commit a
+    # real value; generate one into the local .env only (see .env.example).
+    secret_key: str = field(default_factory=lambda: os.environ.get(
+        "SECRET_KEY", os.environ.get("AUTH_SECRET", "")))
+    # JWT lifetime in seconds. Default 7 days (604800).
+    auth_token_lifetime_seconds: int = field(default_factory=lambda: _int(
+        "AUTH_TOKEN_LIFETIME_SECONDS", 7 * 24 * 3600))
+    # Optional seed/dev account, created on startup only if BOTH are set
+    # (local dev/testing only — never set in production). No user is
+    # auto-created when these are absent.
+    seed_email: str = field(default_factory=lambda: os.environ.get(
+        "SEED_EMAIL", ""))
+    seed_password: str = field(default_factory=lambda: os.environ.get(
+        "SEED_PASSWORD", ""))
     cors_origins: list = field(default_factory=lambda: [
         o.strip() for o in os.environ.get(
             "CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()

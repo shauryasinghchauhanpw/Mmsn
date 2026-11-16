@@ -177,7 +177,13 @@ def vertical_filter(center_x: float | None = None,
         crop_x = "(iw-ih*9/16)/2"
     else:
         # x = clamp(center_x*iw - crop_w/2, 0, iw - crop_w)
+        # The commas inside min()/max() MUST be escaped (\,) — an
+        # unescaped comma ends the filter argument in a filtergraph, so
+        # the unescaped form fails with "No such filter: '0)'". This was
+        # a latent Phase 1 bug: no face was ever tracked in testing, so
+        # center_x was always None and this branch never ran until the
+        # Phase 2 editor's framing nudge exercised it (2026-11-16).
         crop_x = (
-            f"min(max({center_x:.4f}*iw-ih*9/32,0),iw-ih*9/16)"
+            f"min(max({center_x:.4f}*iw-ih*9/32\\,0)\\,iw-ih*9/16)"
         )
     return f"crop=ih*9/16:ih:{crop_x}:0,scale={target_w}:{target_h}"
