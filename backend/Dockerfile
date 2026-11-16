@@ -7,10 +7,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# FFmpeg (+ libass for caption burn-in) and a font for the subtitles.
+# FFmpeg (+ libass for caption burn-in) and fonts for the subtitles.
+# libgl1 + libglib2.0-0: scenedetect pulls in non-headless opencv-python,
+# which needs libGL at import time. Without them the server still boots
+# (cv2/scenedetect imports are lazy and caught), but face tracking and
+# scene detection silently degrade to centre-crop / no scene snapping.
+# fonts-liberation is metrically compatible with the "Arial" the ASS
+# caption styles ask for (Debian has no Arial); DejaVu alone would render
+# the captions at different sizes than designed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fonts-dejavu-core \
+    fonts-liberation \
+    libgl1 \
+    libglib2.0-0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,4 +46,8 @@ EXPOSE 8000
 # NOTE: for a commercial product, use an LGPL FFmpeg build instead of the
 # distro one (see THIRD_PARTY_LICENSES.md). The Debian ffmpeg package is
 # fine for development / personal use.
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# PORT: Render (and Railway) inject a PORT env var (Render default 10000)
+# and route traffic + health checks to it. A hardcoded --port 8000 would
+# leave the service unreachable ("no open ports detected"). ${PORT:-8000}
+# listens on Render's port in prod and on 8000 locally.
+CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

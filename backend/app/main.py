@@ -32,6 +32,14 @@ Logout is client-side token discard (see auth.py): the frontend deletes
 the stored JWT on sign-out / on any 401. Tokens expire after
 AUTH_TOKEN_LIFETIME_SECONDS (default 7 days).
 
+Phase 3 (production hardening): Postgres via DATABASE_URL (see
+database.py), S3-compatible storage via STORAGE_BACKEND (see
+storage.py — upload/download/thumbnail go through it; the pipeline
+reads DB paths, materialised by the job wrapper in jobs.py), and
+Celery + Redis workers via CELERY_BROKER_URL (see celery_app.py —
+unset means the in-process queue, as before). /health reports which
+backends this process is running with.
+
 Run: uvicorn backend.app.main:app --reload --port 8000
 """
 from __future__ import annotations
@@ -43,7 +51,7 @@ import uuid
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from .auth import (UserCreate, UserRead, UserUpdate, auth_backend,
@@ -51,8 +59,9 @@ from .auth import (UserCreate, UserRead, UserUpdate, auth_backend,
                    seed_user_if_configured)
 from .config import settings
 from .database import SessionLocal, get_db, init_db
-from .jobs import mark_stale_jobs_failed, submit_job
+from .jobs import mark_stale_jobs_failed, recover_interrupted_jobs, submit_job
 from .models import Clip, Highlight, Job, Project, Transcript, User
+from .storage import get_storage, is_s3_ref
 from .schemas import (CaptionOverrideIn, ClipCaptionsOut, ClipDetailOut,
                       ClipOut, HighlightOut, JobOut, ProjectOut,
                       ReRenderRequest, ThumbnailOut, TranscriptOut,
@@ -96,9 +105,19 @@ async def startup():
     os.makedirs(settings.upload_dir, exist_ok=True)
     os.makedirs(settings.media_dir, exist_ok=True)
     await seed_user_if_configured()
-    stale = mark_stale_jobs_failed()
-    if stale:
-        print(f"Marked {stale} stale job(s) as failed (server restarted).")
+    if settings.celery_enabled:
+        # Celery mode: jobs survive a backend restart — re-queue rows
+        # still queued/running instead of failing them (see jobs.py).
+        # A misconfigured Celery (broker set, package missing) fails
+        # startup loudly here rather than silently running jobs
+        # in-process.
+        recovered = recover_interrupted_jobs()
+        if recovered:
+            print(f"Re-queued {recovered} interrupted job(s) to Celery.")
+    else:
+        stale = mark_stale_jobs_failed()
+        if stale:
+            print(f"Marked {stale} stale job(s) as failed (server restarted).")
 
 
 @app.get("/health")
@@ -106,7 +125,14 @@ def health():
     return {"status": "ok", "version": "0.2.0",
             "youtube_api_configured": bool(settings.youtube_api_key),
             "llm_scoring_configured": bool(settings.openai_api_key),
-            "whisper_model": settings.whisper_model}
+            "whisper_model": settings.whisper_model,
+            # Phase 3 (production hardening) — which backends this
+            # process is actually running with. Local dev reports
+            # sqlite / local / in-process.
+            "database": settings.database_dialect,
+            "storage_backend": ("s3" if settings.use_s3 else "local"),
+            "job_queue": ("celery" if settings.celery_enabled
+                          else "in-process")}
 
 
 def _project_or_404(db: Session, project_id: int, user: User) -> Project:
@@ -141,9 +167,15 @@ async def upload_project(file: UploadFile = File(...),
                    f"{', '.join(sorted(ALLOWED_EXTENSIONS))}")
     os.makedirs(settings.upload_dir, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
-    stored_path = os.path.join(settings.upload_dir, stored_name)
+    # Stream to a temp file first (ffprobe needs a local file), then
+    # hand it to the storage backend. Local mode moves it to
+    # UPLOAD_DIR/<stored_name> — the exact path Phase 1/2 stored.
+    # S3 mode uploads it to s3://<bucket>/uploads/<stored_name> and
+    # the temp file is removed afterwards.
+    tmp_path = os.path.join(settings.upload_dir,
+                            f".upload-{uuid.uuid4().hex}.part")
     size = 0
-    with open(stored_path, "wb") as out:
+    with open(tmp_path, "wb") as out:
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:
@@ -151,24 +183,31 @@ async def upload_project(file: UploadFile = File(...),
             size += len(chunk)
             if size > settings.max_upload_bytes:
                 out.close()
-                os.remove(stored_path)
+                os.remove(tmp_path)
                 raise HTTPException(
                     status_code=413,
                     detail=f"File exceeds the {settings.max_upload_mb} MB limit")
             out.write(chunk)
-    duration = probe_duration(stored_path)
+    duration = probe_duration(tmp_path)
     if duration <= 0:
-        os.remove(stored_path)
+        os.remove(tmp_path)
         raise HTTPException(
             status_code=400,
             detail="Could not read this video file (ffprobe found no duration). "
                    "It may be corrupt or in an unsupported format.")
     if duration > settings.max_video_seconds:
-        os.remove(stored_path)
+        os.remove(tmp_path)
         raise HTTPException(
             status_code=400,
             detail=f"Video is {duration/3600:.1f}h long — the limit is "
                    f"{settings.max_video_seconds/3600:.0f}h.")
+    storage = get_storage()
+    stored_path = storage.put_file(
+        tmp_path, storage.make_ref("upload", stored_name))
+    if os.path.exists(tmp_path):
+        # S3 put_file leaves the local file behind; local put_file
+        # moved it, so this only fires in S3 mode.
+        os.remove(tmp_path)
     project = Project(
         user_id=user.id,
         title=os.path.splitext(file.filename or stored_name)[0][:500],
@@ -297,9 +336,16 @@ def download_clip(clip_id: int, db: Session = Depends(get_db),
     project = db.query(Project).get(clip.project_id)
     if project is None or project.user_id != user.id:
         raise HTTPException(status_code=404, detail="Clip not found")
-    if not os.path.exists(clip.path):
+    storage = get_storage()
+    if not storage.exists(clip.path):
         raise HTTPException(status_code=410,
                             detail="Clip file is no longer on disk.")
+    if is_s3_ref(clip.path):
+        # S3 mode: the browser downloads straight from the bucket on
+        # a presigned URL (valid S3_PRESIGNED_EXPIRY_SECONDS).
+        url = storage.download_url(
+            clip.path, filename=f"mmsn-clip-{clip.id}.mp4")
+        return RedirectResponse(url=url, status_code=302)
     return FileResponse(clip.path, media_type="video/mp4",
                         filename=f"mmsn-clip-{clip.id}.mp4")
 
@@ -470,24 +516,53 @@ def set_clip_thumbnail(clip_id: int, t: float = Query(..., ge=0),
     store it as the clip's thumbnail (overwrites any previous one).
     Served by GET /api/clips/{id}/thumbnail."""
     clip = _clip_or_404(db, clip_id, user)
-    if not os.path.exists(clip.path):
+    storage = get_storage()
+    # FFmpeg needs a local file: in S3 mode the clip is downloaded to
+    # the cache first (local mode: this is the path itself, unchanged).
+    clip_local = storage.local_path(clip.path)
+    if not os.path.exists(clip_local):
         raise HTTPException(status_code=410,
                             detail="Clip file is no longer on disk.")
-    duration = clip.duration_sec or probe_duration(clip.path)
+    duration = clip.duration_sec or probe_duration(clip_local)
     if duration <= 0 or t > duration:
         raise HTTPException(
             status_code=400,
             detail=f"t must be within the clip (0–{duration:.1f}s), "
                    f"got {t}.")
-    work_dir = os.path.dirname(clip.path)
-    thumb_path = os.path.join(work_dir, f"clip_{clip.id}_thumb.jpg")
-    result = run(["ffmpeg", "-y", "-v", "error", "-ss", str(t),
-                  "-i", clip.path, "-frames:v", "1", "-q:v", "3",
-                  thumb_path])
-    if result.returncode != 0 or not os.path.exists(thumb_path):
-        raise FFmpegError(
-            f"Thumbnail extraction failed: {result.stderr.strip()[:300]}")
-    clip.thumbnail_path = thumb_path
+    if is_s3_ref(clip.path):
+        # S3 mode: extract to a temp file, upload it next to the clip
+        # in the bucket (media/project_<id>/clip_<id>_thumb.jpg), and
+        # store the s3:// ref. The local temp file is removed after.
+        from .storage import parse_s3_ref
+        bucket, key = parse_s3_ref(clip.path)
+        thumb_key = key.rsplit(".", 1)[0] + "_thumb.jpg" \
+            if "." in os.path.basename(key) else key + "_thumb.jpg"
+        # (clip filenames always end .mp4, so the rsplit above yields
+        # clip_<id>_thumb.jpg next to the clip.)
+        thumb_tmp = os.path.join(
+            settings.media_dir, ".s3cache",
+            f"thumb-{clip.id}-{uuid.uuid4().hex}.jpg")
+        os.makedirs(os.path.dirname(thumb_tmp), exist_ok=True)
+        result = run(["ffmpeg", "-y", "-v", "error", "-ss", str(t),
+                      "-i", clip_local, "-frames:v", "1", "-q:v", "3",
+                      thumb_tmp])
+        if result.returncode != 0 or not os.path.exists(thumb_tmp):
+            raise FFmpegError(
+                f"Thumbnail extraction failed: {result.stderr.strip()[:300]}")
+        thumb_ref = storage.put_file(
+            thumb_tmp, f"s3://{bucket}/{thumb_key}")
+        os.remove(thumb_tmp)
+    else:
+        work_dir = os.path.dirname(clip.path)
+        thumb_path = os.path.join(work_dir, f"clip_{clip.id}_thumb.jpg")
+        result = run(["ffmpeg", "-y", "-v", "error", "-ss", str(t),
+                      "-i", clip.path, "-frames:v", "1", "-q:v", "3",
+                      thumb_path])
+        if result.returncode != 0 or not os.path.exists(thumb_path):
+            raise FFmpegError(
+                f"Thumbnail extraction failed: {result.stderr.strip()[:300]}")
+        thumb_ref = thumb_path
+    clip.thumbnail_path = thumb_ref
     db.commit()
     return ThumbnailOut(clip_id=clip.id, t=t,
                         thumbnail_url=f"/api/clips/{clip.id}/thumbnail")
@@ -497,9 +572,15 @@ def set_clip_thumbnail(clip_id: int, t: float = Query(..., ge=0),
 def get_clip_thumbnail(clip_id: int, db: Session = Depends(get_db),
                        user: User = Depends(current_active_user)):
     clip = _clip_or_404(db, clip_id, user)
-    if not clip.thumbnail_path or not os.path.exists(clip.thumbnail_path):
+    storage = get_storage()
+    if not clip.thumbnail_path or not storage.exists(clip.thumbnail_path):
         raise HTTPException(status_code=404,
                             detail="No thumbnail set for this clip yet — "
                                    "use the editor to pick a frame.")
+    if is_s3_ref(clip.thumbnail_path):
+        url = storage.download_url(
+            clip.thumbnail_path,
+            filename=f"mmsn-clip-{clip.id}-thumb.jpg")
+        return RedirectResponse(url=url, status_code=302)
     return FileResponse(clip.thumbnail_path, media_type="image/jpeg",
                         filename=f"mmsn-clip-{clip.id}-thumb.jpg")

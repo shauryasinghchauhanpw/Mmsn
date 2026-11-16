@@ -5,6 +5,20 @@ pydantic==2.10.4
 python-multipart==0.0.20
 python-dotenv==1.2.4
 httpx==0.28.1
+# Production database driver (Phase 3): psycopg v3 (binary wheels — no
+# libpq build needed). DATABASE_URL=postgresql+psycopg://... (or
+# postgres://, normalised in backend/app/database.py). psycopg2 is NOT
+# a dependency; do not use a postgresql+psycopg2:// URL unless you add
+# it yourself. SQLite (dev default) needs no driver.
+psycopg[binary]==3.2.4
+# S3-compatible object storage (Phase 3): only used when
+# STORAGE_BACKEND=s3; local mode never imports boto3.
+boto3==1.35.90
+# Background workers (Phase 3): only used when CELERY_BROKER_URL is
+# set; the in-process queue needs neither. redis is Celery's broker /
+# result-backend client library here.
+celery==5.4.0
+redis==6.4.0
 # Auth (Phase 2, step 1): fastapi-users 15.0.0 with JWT bearer tokens.
 # NOTE: fastapi-users 15 ships an async-only SQLAlchemy adapter, but this
 # app uses sync SQLAlchemy sessions — see backend/app/auth.py for the thin

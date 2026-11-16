@@ -12,8 +12,39 @@ services:
     # instance may boot and serve the dashboard, but processing a video
     # longer than a minute or two will be very slow or run out of memory.
     envVars:
+      # Phase 3: managed Postgres (see `databases:` below). The app
+      # falls back to SQLite when DATABASE_URL is unset or not a
+      # postgres URL — to stay on SQLite, delete the `databases:`
+      # block and restore this entry to
+      # `value: sqlite:////app/media/mmsn.db` (SQLite lives ON the
+      # persistent disk below, so it survives restarts/redeploys).
+      # Render injects the connection string; the backend normalises
+      # postgres:// to postgresql+psycopg:// (psycopg v3 is in
+      # backend/requirements.txt; psycopg2 is NOT used).
       - key: DATABASE_URL
-        value: sqlite:///./mmsn.db
+        fromDatabase:
+          name: mmsn-db
+          property: connectionString
+      # Redis (see the mmsn-redis keyvalue service below) is defined
+      # but NOT wired in yet: setting CELERY_BROKER_URL/REDIS_URL
+      # without a Celery worker service would queue jobs no worker
+      # ever runs. Add a worker service (celery -A
+      # backend.app.celery_app worker) and then uncomment:
+      # - key: REDIS_URL
+      #   fromService:
+      #     type: keyvalue
+      #     name: mmsn-redis
+      #     property: connectionString
+      # S3 storage is also opt-in via the dashboard (STORAGE_BACKEND=s3
+      # + S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY/S3_ENDPOINT_URL); the
+      # default stays local files on the disk below.
+      # Same reason: keep uploads on the disk too. MEDIA_DIR already
+      # defaults to ./media (/app/media, on the disk); set explicitly
+      # so a future default change cannot silently move clips off it.
+      - key: UPLOAD_DIR
+        value: /app/media/uploads
+      - key: MEDIA_DIR
+        value: /app/media
       # REQUIRED (Phase 2, step 1): JWT signing secret. Render generates a
       # random value on first apply — do not put a real secret in the repo.
       # The backend refuses to start without a secret of >= 32 chars.
@@ -47,3 +78,27 @@ services:
     envVars:
       - key: NEXT_PUBLIC_API_URL
         value: https://mmsn-backend.onrender.com
+
+  # Phase 3 — Redis for Celery (CELERY_BROKER_URL / REDIS_URL).
+  # Defined here so it exists when a worker service is added; NOT
+  # wired into the backend yet — see the commented REDIS_URL entry
+  # above. Delete this entry to drop Redis entirely.
+  - type: keyvalue
+    name: mmsn-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    # ^ Jobs must never be evicted: a queued job evicted from Redis
+    # is only recovered if its DB row is still queued/running at
+    # backend startup (see jobs.recover_interrupted_jobs).
+
+# Phase 3 — managed Postgres (optional: the app runs without it on
+# SQLite + local files + the in-process queue; delete this block and
+# the DATABASE_URL fromDatabase entry above to go back).
+databases:
+  - name: mmsn-db
+    plan: free
+    databaseName: mmsn
+    user: mmsn
+    # Postgres 16. Wired into the backend as DATABASE_URL above.
+    # Free-plan note: Render's free Postgres expires after 90 days —
+    # upgrade the plan before then or move the data.

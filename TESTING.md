@@ -403,3 +403,130 @@ step 2. Test scripts: `/tmp/test_llm_mock.py`,
   (>10 min), concurrent jobs, and phone-browser usage — still not tested.
   The editor / auth / scorer-label UI was verified at the API + build
   level only; no live browser check exists in this environment.
+
+---
+
+# Phase 3 — automated pytest suite (2026-11-16)
+
+**What changed:** the Phase 2 `/tmp` scripts (`test_auth.py`,
+`test_editor_smoke.py`, `test_editor_render.py`,
+`test_editor_framing.py`, `test_editor_retest.py`,
+`test_llm_mock.py`, `test_phase2_final.py`) were converted into a
+real pytest suite in the repo under `backend/tests/` and are now
+retired as the source of truth — the `/tmp` copies are stale
+snapshots, not maintained. No app code was changed for the suite.
+
+**How it runs:** `backend/tests/conftest.py` sets the test
+environment *before* importing the app — `DATABASE_URL` points at a
+fresh temp SQLite file, `UPLOAD_DIR`/`MEDIA_DIR` are temp dirs, and a
+test-only `SECRET_KEY` is used — then the app runs in-process via
+`fastapi.testclient.TestClient`. The dev database (`./mmsn.db`) is
+never touched, and no test user/project/clip from the suite leaks
+into it. The test video is generated locally with FFmpeg
+(`testsrc` 1280×720 30 fps + real spoken English via the `flite`
+filter, ~210 words, 65.87 s) — the same recipe as the Phase 1/2
+manual runs. **No YouTube video was downloaded.** LLM scoring is
+tested against a local mock `/chat/completions` server; no real
+OpenAI key was used or needed.
+
+**Commands** (from the repo root, in the venv;
+`pip install -r backend/requirements-test.txt` first — pytest only,
+httpx is already a runtime dependency):
+
+```bash
+python -m pytest backend/tests -m "not slow"   # fast suite
+python -m pytest backend/tests                  # full suite
+```
+
+## Results
+
+| Run | Result | Time |
+|---|---|---|
+| Fast suite (`-m "not slow"`) — 96 tests | ✅ **96 passed**, 4 deselected | **41.95 s** |
+| Full suite — 100 tests | ✅ **100 passed** | **429.39 s (7:09)** |
+| Slow-only re-run (`-m slow`) — 4 tests, with `--durations=10` | ✅ **4 passed** | **499.66 s (8:19)** |
+
+Tests per file (100 total): `test_auth.py` 25, `test_editor.py` 23,
+`test_llm_scoring.py` 5, `test_pipeline_e2e.py` 6,
+`test_units.py` 41.
+
+Slow-test timings (from the slow-only re-run; the full-suite run was
+faster overall because the shared `processed_project` fixture is
+built once):
+
+| Slow test | Time |
+|---|---|
+| `test_editor_full_chain` — 7 real re-renders, versions 1→7 (trim, caption, style, framing, volume, thumbnail, regenerate), setup = upload + full pipeline run | 274.32 s call + 142.04 s setup |
+| `test_framing_rerender_moves_centre_crop` — API framing re-render on a no-face clip | 61.54 s |
+| `test_synthetic_face_track_render` — 3 direct `render_clip()` calls with a synthetic face track | 20.85 s |
+| `test_full_pipeline_end_to_end` — assertions on the shared fixture's run (pipeline itself is the chain test's 142 s setup) | 0.36 s |
+
+The full end-to-end test passes: upload → process (job `done`,
+~142 s warm on this VM) → clips (≥1, `h264, 1080×1920`) →
+download byte-identical to disk → transcript with word timestamps
+→ highlights with `scorer: "heuristic"` and reasons.
+
+### What the fast suite covers (no full render)
+
+- Auth: 16 unauthenticated endpoints → 401; register/login/me;
+  duplicate register, short password, invalid email, wrong password
+  (`LOGIN_BAD_CREDENTIALS`), unknown user; per-user ownership (Bob
+  gets 404 on Alice's project/clips/highlights/transcript/process);
+  YouTube endpoint 501 not-configured / 400 non-YouTube URL;
+  `/health` public.
+- Upload/process validation: bad extension → 400, non-video file →
+  400, missing project → 404, metadata-only YouTube project →
+  400, queued-job dedup (re-POST returns the existing job).
+- URL parsing: 11 valid YouTube forms + 7 invalid; ISO-8601
+  durations (8 cases).
+- Editor validation/auth (on DB-seeded clip rows, no pipeline):
+  clip detail + captions, 401 anon / 404 other user on all six
+  editor endpoints, bad style → 400, trim out-of-range / <2 s /
+  start==end / start>end → 400, volume/framing out of range → 422,
+  missing clip → 404, thumbnail before set → 404, `t=999` → 400.
+- Caption units: `merge_edit_params` defaults/clamps/unknown-style
+  fallback, `retime_text` even splits, the group-boundary fix
+  (edited group stays exactly "HELLO EDITED WORDS", next group keeps
+  its own words), empty-override drops the group, `group_words`
+  `_new_group` splits, ASS per-word (karaoke) vs per-group
+  (minimal), unknown style falls back to karaoke.
+- Heuristic scorer units: deterministic, non-overlapping picks,
+  empty transcript → no highlights.
+- LLM mock: success → scorer `"llm"` with the mock's titles/scores
+  (95/88) and exactly one request carrying transcript text and the
+  dummy model name; mock 500 → `"heuristic"` with the
+  "LLM scoring unavailable" reason, matching the no-config run;
+  empty API key → heuristic with no request sent.
+
+### One conversion bug found (test was wrong, app was right)
+
+During conversion, `test_re_render_trim_validation` expected 400 for
+a negative `trim_start`; the app returns **422** because pydantic's
+`ge=0` on `ReRenderRequest.trim_start` fires before the endpoint's
+own 400 trim check. The test was corrected to 422 with a comment.
+No app code changed.
+
+### Warnings (not failures)
+
+The runs emit SQLAlchemy `LegacyAPIWarning`s (`Query.get()` is
+legacy in 2.0) and a `datetime.utcnow()` deprecation warning from
+the app's existing code, plus FastAPI/Starlette deprecation warnings
+from the installed libraries. All pre-existing; none fail a test.
+
+### Still NOT covered by the suite
+
+- Everything in the "NOT tested" lists above that is still open:
+  Docker builds and Render/Railway deploy, YouTube Data API with a
+  real key, LLM scoring with a real OpenAI key, yt-dlp, a real
+  talking-head video with a face (face-following uses a synthetic
+  track only), long videos (>10 min), concurrent jobs, and any
+  phone-browser / frontend interaction. The suite is API + pipeline
+  level only.
+- The editor chain test runs against the first clip of the shared
+  processed project, and the e2e assertions are written to hold
+  whether that clip is at version 1 or version 7 — but if the chain
+  test is run on its own (`-k test_editor_full_chain`), it builds
+  its own processed project; the two paths share the same fixture.
+- Fast-suite runtime (42–84 s across runs on this VM, varying with
+  machine load) is dominated by generating the test video with FFmpeg
+  (~40 s); the HTTP/unit tests themselves take ~2 s.

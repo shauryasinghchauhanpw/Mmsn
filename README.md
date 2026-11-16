@@ -4,14 +4,17 @@ Paste a YouTube link for metadata, or **upload your own video** — the pipeline
 transcribes it, finds the best moments, and renders vertical 1080×1920 clips
 with burned-in word captions.
 
-> **Phase 2 status (2026-11-16): COMPLETE** — real auth (sign-up /
-> sign-in, per-user projects), the editor WORKS (trim, caption editing,
-> subtitle styles, framing nudge, volume, thumbnails, regenerate — all
-> wired to real FFmpeg re-renders, see "Editing a clip" below), and LLM
-> highlight scoring is wired with the scorer recorded per highlight
-> ("Scored by: LLM / Heuristic", see "Highlight scoring" below). Still
-> missing: no payments, no publishing, no cloud deploy yet. Be honest
-> about that — see `ARCHITECTURE.md` §7 for the full gap list.
+> **Phase 3 status (2026-11-16): COMPLETE** — everything in Phase 2,
+> plus a real pytest suite in the repo (`backend/tests/`, 100 tests,
+> see "Testing" below), production hardening (Postgres + S3-compatible
+> storage + Redis/Celery workers, all config-driven with the
+> SQLite/local/in-process behaviour as the dev fallback), and deploy
+> fixes (backend now listens on Render's injected `PORT`, DB/uploads
+> on the persistent disk, missing OpenCV libs added). Still missing:
+> no payments, no publishing, no live cloud deploy yet (Docker builds
+> and the Render deploy are untested — no daemon/account here; see
+> `DEPLOYMENT.md`). Be honest about that — see `ARCHITECTURE.md` §7
+> for the full gap list.
 
 ## Quick start
 
@@ -189,7 +192,13 @@ placeholders.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./mmsn.db` | SQLAlchemy URL (Postgres in prod) |
+| `DATABASE_URL` | `sqlite:///./mmsn.db` | SQLAlchemy URL. Postgres in prod: `postgresql+psycopg://user:pass@host:5432/mmsn` (a bare `postgres://` URL is normalised to this; same models on both — see ARCHITECTURE.md §5b) |
+| `STORAGE_BACKEND` | `local` | `local` = files under `UPLOAD_DIR`/`MEDIA_DIR` (default); `s3` = S3-compatible object storage (see below) |
+| `S3_ENDPOINT_URL` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | — | S3 backend settings; only used when `STORAGE_BACKEND=s3`. Blank endpoint = AWS S3 itself; set it for MinIO/R2/etc. Blank keys fall back to boto3's default credential chain |
+| `S3_REGION` | `us-east-1` | S3 region for signing |
+| `S3_PRESIGNED_EXPIRY_SECONDS` | `3600` | How long a presigned S3 download URL stays valid |
+| `CELERY_BROKER_URL` / `REDIS_URL` | — | Redis broker URL (e.g. `redis://localhost:6379/0`). Unset = in-process job queue (default); set = jobs go to Celery workers — run one with `celery -A backend.app.celery_app worker --loglevel=info --concurrency=1` |
+| `CELERY_RESULT_BACKEND` | broker URL | Optional; job state lives in the DB, not in Celery results |
 | `SECRET_KEY` | — (required) | JWT signing secret, ≥ 32 random chars. Server refuses to start without it. `AUTH_SECRET` is accepted as an alias. Never commit a real value. |
 | `AUTH_TOKEN_LIFETIME_SECONDS` | `604800` (7 days) | JWT lifetime |
 | `SEED_EMAIL` / `SEED_PASSWORD` | — | Dev-only seed account, created on startup only if both are set. Never set in production. |
@@ -219,12 +228,35 @@ TESTING.md           What was actually tested, pass/fail
 
 ## Testing
 
-Manual end-to-end runs are recorded in `TESTING.md` — Phase 1, Phase 2
-step 1 (auth), step 2 (editor), and step 3 (LLM mock scoring + full
-re-test, 2026-11-16). Test videos are generated locally with FFmpeg —
-no YouTube downloads. There is still no automated test suite in the
-repo (the Phase 2 test scripts live in `/tmp`, not in git); that is a
-Phase 3 item.
+Automated pytest suite in `backend/tests/` (Phase 3, 2026-11-16) —
+converted from the Phase 2 `/tmp` scripts, which are now retired.
+It runs the FastAPI app in-process (TestClient) against a fresh temp
+SQLite DB and temp upload/media dirs per run, so the dev `mmsn.db`
+is never touched. Test videos are generated locally with FFmpeg
+(`testsrc` + spoken English via the `flite` filter) — no YouTube
+downloads. See `TESTING.md` for the full results record.
+
+```bash
+pip install -r backend/requirements-test.txt   # pytest (httpx is already a runtime dep)
+python -m pytest backend/tests -m "not slow"  # fast suite: auth, validation,
+                                               # ownership, URL parsing, LLM
+                                               # mock scoring, editor
+                                               # validation — no full render
+python -m pytest backend/tests                 # full suite, incl. the slow
+                                               # end-to-end pipeline run and
+                                               # the real editor re-render chain
+```
+
+Slow tests are marked `@pytest.mark.slow`: the full upload → process
+→ clips → download run (real Whisper `tiny` + FFmpeg, ~2–3 min on
+this VM) and the editor re-render chain (trim → caption → style →
+framing → volume → thumbnail → regenerate, versions 1→7). The fast
+suite covers everything else and needs no pipeline run — editor
+validation/auth tests use DB rows seeded directly into the test DB.
+LLM scoring is tested against a local mock `/chat/completions`
+server; no real OpenAI key is used or needed.
+
+Manual end-to-end runs from Phase 1/2 are recorded in `TESTING.md`.
 
 ## Deploy
 

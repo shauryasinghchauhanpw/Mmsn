@@ -1,0 +1,5 @@
+pytest==9.2.0
+# httpx is already a runtime dependency (backend/requirements.txt) and
+# is used by fastapi.testclient; no other test-only packages are needed.
+# opencv-python-headless and numpy are runtime dependencies too and are
+# used by the pixel-diff checks in test_editor.py.

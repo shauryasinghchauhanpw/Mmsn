@@ -1,0 +1,5 @@
+# This directory is intentionally empty (for now).
+# frontend/Dockerfile copies /app/public into the standalone runner image,
+# and a Docker COPY fails if the source path does not exist — so this
+# folder must exist even with no files in it. Put favicons / static
+# assets here later and they will be served automatically.

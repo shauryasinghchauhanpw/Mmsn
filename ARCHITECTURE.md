@@ -4,8 +4,12 @@
 **Status:** Phase 1 scaffold — upload → transcribe → highlight → render pipeline working
 locally — plus Phase 2 complete (2026-11-16): real auth (step 1), working
 video editor (step 2), and LLM scoring wired with the scorer recorded per
-highlight and shown in the UI (step 3). Not a finished SaaS: no payments,
-no publishing, no cloud deployment yet (see §7 "What Phase 1 is NOT").
+highlight and shown in the UI (step 3) — plus Phase 3 complete
+(2026-11-16): automated pytest suite in the repo (100 tests), Postgres +
+S3-compatible storage + Redis/Celery workers (config-driven, dev
+fallbacks intact), and deploy fixes (Render `PORT`, DB/uploads on the
+persistent disk). Not a finished SaaS: no payments, no publishing, no
+live cloud deployment yet (see §7 "What Phase 1 is NOT").
 
 Full component research (licences, alternatives, verdicts) lives in
 [`research.md`](research.md). This file is the final stack decision.
@@ -43,9 +47,9 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
 | Editor re-render | **Background job reusing the jobs table (`kind="rerender"`) + `pipeline/rerender.py`** | The editor POSTs edit parameters; a worker re-renders the clip from the source video with the same `render_clip()` used for first-time renders, versioned output (`clip_{id}_v{n}.mp4`), clip row switched only on success. See §9. |
 | Captions | **Own `.ass` generator + FFmpeg libass burn-in** | Word timestamps → short caption groups (≤4 words, break on punctuation / pauses >0.6 s) → ASS with per-word highlight → `ass` filter burn-in. No third-party auto-caption dependency. |
 | Templated graphics | **FFmpeg `drawtext` / ASS first** | Remotion is NOT open source; an automated SaaS is its paid "Automators" tier ($0.01/render, $100/mo min) and only free while the team is ≤3. Deferred; revisit only if React templating is wanted. |
-| Database | **SQLite (local dev) / PostgreSQL (production)** via SQLAlchemy 2.0 | Zero-setup local dev; Postgres is the production target. Same models, `DATABASE_URL` switch. |
-| Background jobs | **In-process threaded queue (Phase 1)** | `ThreadPoolExecutor` + job rows in the DB. Honest limitation: jobs die with the process, no retries across restarts, no horizontal scaling. Path to Redis + Celery (or RQ/Arq) is documented in §5 — do NOT claim Celery/Redis are running; they are not. |
-| Storage | **Local filesystem (`uploads/`, `media/`) in dev; S3-compatible object storage in prod** | Same path abstraction; presigned URLs later. |
+| Database | **SQLite (local dev) / PostgreSQL (production)** via SQLAlchemy 2.0 | Zero-setup local dev; Postgres is the production target. Same models, `DATABASE_URL` switch (Phase 3: `postgresql+psycopg://`, bare `postgres://` normalised; see §5b). |
+| Background jobs | **In-process threaded queue (default) / Celery + Redis (Phase 3, opt-in)** | `ThreadPoolExecutor` + job rows in the DB. Honest limitation in-process: jobs die with the process, no retries across restarts, no horizontal scaling. With `CELERY_BROKER_URL` set, the same job rows and the same `runner.py` entrypoint run on Celery workers instead, with startup recovery (see §5). Do NOT claim Celery/Redis are running unless the broker URL is set — they are off by default. |
+| Storage | **Local filesystem (`uploads/`, `media/`) in dev; S3-compatible object storage in prod** | `backend/app/storage.py` (Phase 3): one interface, `STORAGE_BACKEND` switch; S3 mode serves presigned download URLs and caches objects locally for FFmpeg (see §5b). |
 | Auth | **fastapi-users 15.0.0, JWT bearer (Phase 2, step 1 — DONE 2026-11-16)** | Sign-up `POST /auth/register`, sign-in `POST /auth/jwt/login` (JWT, HS256, 7-day lifetime, secret from `SECRET_KEY`), `GET /users/me`, logout = client-side token discard. Every `/api/*` route requires a valid token and is scoped to the signed-in user's own projects — another user's project/job/clip returns 404, never leaking existence. Passwords: Argon2/bcrypt via fastapi-users' password helper, min 8 chars. The Phase 1 placeholder dev user is gone; no request path auto-creates a user. Optional `SEED_EMAIL`/`SEED_PASSWORD` startup seed (dev only). Because fastapi-users 15 ships an async-only SQLAlchemy adapter and this app is sync, `backend/app/auth.py` has a thin sync adapter over the existing session (documented there). |
 
 ## 3. What needs API keys vs what is free / self-hosted
@@ -77,19 +81,102 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
 4. **Testing rule:** never test with a real download of a video the user does
    not own — metadata listing only (`--simulate` / `--get-title`), or not at all.
 
-## 5. Background jobs — Phase 1 vs the path forward
+## 5. Background jobs — Phase 1 vs Phase 3 (Celery)
 
-- **Phase 1:** `backend/app/jobs.py` — a module-level `ThreadPoolExecutor`
+- **Phase 1/2:** `backend/app/jobs.py` — a module-level `ThreadPoolExecutor`
   (2 workers) plus a `jobs` table. `POST /api/projects/{id}/process` inserts a
   job row (`queued` → `running` → `done`/`failed`, with `error` text and
   `progress` 0–100) and submits the pipeline to the pool. `GET /api/jobs/{id}`
   polls it. If the server restarts, `running`/`queued` jobs are marked `failed`
   ("server restarted") on startup — they are never silently re-run.
-- **Later:** replace the executor with Redis + Celery (or RQ/Arq): same job
-  rows, same `runner.py` entrypoint, workers as separate processes, retries
-  with backoff, a dead-letter path, and progress via Redis pub/sub or polling.
-  The pipeline itself (`pipeline/runner.py`) is already a plain function of
-  `(project_id, db_session_factory)` so it moves unchanged.
+- **Phase 3 (DONE 2026-11-16): Celery + Redis, opt-in via `CELERY_BROKER_URL`
+  (or `REDIS_URL` as an alias).** When the broker URL is unset, the
+  in-process queue above is still the behaviour — nothing changes for
+  local dev. When it is set, `jobs.submit_job()` sends the job to a
+  Celery worker (`backend/app/celery_app.py`, tasks `mmsn.run_pipeline`
+  / `mmsn.run_rerender`) instead of the pool; the pipeline entrypoints
+  (`pipeline/runner.py`, `pipeline/rerender.py`) are unchanged — both
+  dispatch modes call the same `jobs.execute_job()` wrapper, which
+  claims the job row, runs the function, and records a crash as
+  `failed`. Run a worker from the repo root with
+  `celery -A backend.app.celery_app worker --loglevel=info --concurrency=1`
+  (concurrency 1: one job saturates the CPU with Whisper + FFmpeg;
+  scale with more worker processes, not threads). The worker needs
+  the same environment as the backend (`DATABASE_URL`, storage vars,
+  Whisper model, FFmpeg on PATH); `SECRET_KEY` is not needed by the
+  worker. `CELERY_RESULT_BACKEND` defaults to the broker URL and is
+  optional — job state lives in the DB, polled via `GET /api/jobs/{id}`,
+  not in Celery results. No task time limit is set on purpose: a long
+  video must not be killed by a default.
+- **Recovery (Celery mode) — job rows are the source of truth.** The
+  API process holds no job state, so a backend restart does not touch
+  running jobs: workers are separate processes and keep going. On
+  startup the backend re-queues every job row still `queued`/`running`
+  (`jobs.recover_interrupted_jobs()`) in case the broker lost the
+  message (e.g. a Redis restart without persistence). Tasks use
+  `acks_late=True` + `reject_on_worker_lost=True`, so a worker killed
+  mid-task has its task redelivered; the task skips itself if the row
+  is already `done`/`failed`, so a redelivery re-runs the pipeline
+  from scratch. That re-run is **not idempotent**: a crashed attempt
+  may have left partial highlight/clip rows behind (duplicate clips
+  from the crashed run stay in the DB; re-processing creates a fresh
+  set). There is no automatic retry on a *failed* job — an exception
+  marks the row `failed`, and re-processing is a deliberate user
+  action. In-process mode keeps the old behaviour (stale jobs marked
+  `failed` on startup) — the two modes never mix.
+- **Verification status (honest, 2026-11-16, this VM):** Postgres —
+  verified against a real local PostgreSQL server (`pgserver`):
+  `postgres://` normalisation, `create_all`, CRUD on all 7 tables,
+  and the ALTER TABLE migration path (dropped columns re-added, rows
+  kept). Redis/Celery — verified end-to-end against a real
+  `redis-server`: register → login → upload → process dispatched to a
+  Celery worker → job `done`, 2 clips, byte-identical downloads; and
+  startup recovery re-queued a job stuck in `queued` after a backend
+  restart, which the worker then completed. S3 — verified end-to-end
+  against a moto mock S3 server (NOT real AWS S3): upload → process
+  (materialise/publish wrapper) → presigned downloads → thumbnail,
+  plus a re-render publishing a new versioned object and deleting the
+  old one. Real AWS S3 / R2 / MinIO, a Render Postgres/Redis deploy,
+  and Docker builds are still unverified — the first real deploy is
+  the test for those.
+
+## 5b. Storage — local files (dev) vs S3-compatible (Phase 3)
+
+- **Local (default):** `uploads/` + `media/` on disk, refs are the
+  file paths, exactly as in Phase 1/2. Nothing in the DB changes.
+- **S3 (`STORAGE_BACKEND=s3`):** `backend/app/storage.py` —
+  `LocalStorage` / `S3Storage` behind one interface. Refs become
+  `s3://<bucket>/<key>` (`uploads/<uuid>.<ext>`,
+  `media/project_<id>/clip_<id>.mp4`). Uploads go through
+  `storage.put_file()`; clip/thumbnail downloads are 302 redirects
+  to presigned GET URLs (valid `S3_PRESIGNED_EXPIRY_SECONDS`, default
+  3600 s); anything needing a real file (FFmpeg, ffprobe) uses
+  `storage.local_path()`, which downloads the object once into
+  `media/.s3cache/` and reuses it (refs are content-addressed, so a
+  cached copy cannot go stale). Credentials come from
+  `S3_ACCESS_KEY`/`S3_SECRET_KEY`, or boto3's default chain (env,
+  `~/.aws`, IAM role) when those are blank; `S3_ENDPOINT_URL` blank
+  means AWS S3 itself, set it for MinIO/R2/etc.
+- **The pipeline seam:** `runner.py` / `rerender.py` still read
+  `project.source_path` / `clip.path` from the DB. In S3 mode the job
+  wrapper (`jobs.execute_job`) materialises those refs to the local
+  cache before the run and publishes newly rendered clips back to S3
+  afterwards, restoring the `s3://` refs on the rows. The original ref
+  is recorded in a `.ref` sidecar next to each cached file, so a
+  worker killed mid-job leaves rows pointing at cache paths that the
+  next attempt resolves back to S3 instead of failing. Local mode
+  skips all of this. If a new code path reads a stored file, route it
+  through `storage.local_path()` — do not assume a DB path is local.
+- **Postgres (Phase 3):** same models on SQLite and Postgres via
+  `DATABASE_URL` (`postgresql+psycopg://…`; a bare `postgres://` URL
+  is normalised to that form in `database.py` — psycopg v3 is the
+  driver, psycopg2 is not a dependency). The models use only portable
+  types (no SQLite pragmas, JSON in Text columns) and the migration
+  DDL is valid on both dialects. Engine: `pool_pre_ping=True` on
+  Postgres so idle-timeout connections recycle instead of failing a
+  request. `render.yaml` wires a managed Postgres database service
+  (`mmsn-db`) into the backend; deleting that service and its env
+  wiring falls back to SQLite (the code default).
 
 ## 6. Data model
 
@@ -138,7 +225,25 @@ are added to existing dev databases by the migration in
 - No diarization, no WhisperX alignment (faster-whisper word timestamps only;
   stable-ts rejected for Phase 1 — torch/CUDA weight, research §14).
 - No payments, no publishing to YouTube/TikTok, no scheduling.
-- No Redis/Celery, no S3, no Postgres in dev, no Docker yet.
+- ~~No Redis/Celery, no S3, no Postgres in dev, no Docker yet.~~
+  **DONE in Phase 3 (2026-11-16, config-gated — all off by default):**
+  Postgres via `DATABASE_URL` (same models, psycopg v3 driver, managed
+  `mmsn-db` service in `render.yaml`); S3-compatible storage via
+  `STORAGE_BACKEND=s3` (`backend/app/storage.py`, presigned downloads,
+  local cache for FFmpeg); Celery + Redis workers via
+  `CELERY_BROKER_URL` (`backend/app/celery_app.py`, DB rows are the
+  source of truth, startup recovery re-queues stuck jobs). See §5/§5b
+  for the wiring and the verification status — Postgres and
+  Redis/Celery ran against real local servers, S3 against a moto mock
+  (not real AWS S3); a real cloud deploy is still unverified.
+  Still missing around them: no Docker yet (the Dockerfiles are
+  untested — the worker image needs FFmpeg + the same env as the
+  backend, and `render.yaml` has no Celery worker service yet, so
+  `REDIS_URL` there is deliberately unwired), no dead-letter queue,
+  no per-job retry with backoff (a failed job is re-run by the user),
+  no S3 lifecycle/cleanup for superseded clip versions or the
+  `.s3cache` directory, and pipeline re-runs after a worker crash are
+  not idempotent (duplicate clips from the crashed attempt stay).
 - No automated tests beyond the manual end-to-end runs recorded in `TESTING.md` (Phase 1 + Phase 2 steps 1–3; the test scripts live in `/tmp`, not in the repo).
 - ~~Frontend editor is a skeleton wired to real clip data (trim range + caption
   toggle are "Coming soon" until implemented — they do not pretend to work).

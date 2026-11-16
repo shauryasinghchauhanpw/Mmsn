@@ -1,0 +1,13 @@
+# Keep local junk out of Docker build contexts (Render honours this).
+# Without it, `COPY frontend ./` would ship the local node_modules/.next
+# and `COPY backend ./backend` would ship __pycache__ and the dev DB.
+.git
+.venv
+__pycache__
+*.pyc
+node_modules
+.next
+uploads
+media
+*.db
+.env
