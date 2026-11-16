@@ -446,6 +446,13 @@ python -m pytest backend/tests                  # full suite
 | Full suite — 100 tests | ✅ **100 passed** | **429.39 s (7:09)** |
 | Slow-only re-run (`-m slow`) — 4 tests, with `--durations=10` | ✅ **4 passed** | **499.66 s (8:19)** |
 
+**Coordinator re-run (after all three Phase 3 pieces landed, same
+code as pushed):** fast suite ✅ **96 passed**, 4 deselected,
+**41.35 s**; full suite ✅ **100 passed**, **400.41 s (6:40)**.
+This re-run covers the final merged code — including the Postgres /
+S3 / Celery hardening and the deploy fixes — not just the suite as
+it stood when it was first written.
+
 Tests per file (100 total): `test_auth.py` 25, `test_editor.py` 23,
 `test_llm_scoring.py` 5, `test_pipeline_e2e.py` 6,
 `test_units.py` 41.
