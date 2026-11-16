@@ -1,0 +1,120 @@
+# MMSN Clipper — $0 self-host stack (Oracle Cloud Always Free VM)
+#
+# The recommended free deployment (see DEPLOYMENT.md "Option A" and
+# FREE_TIER.md). One Ampere A1 VM (2–4 OCPU / 12–24 GB RAM, 200 GB disk,
+# forever free) runs everything: backend, Postgres, optional Redis/Celery
+# worker, and Caddy as a reverse proxy with automatic HTTPS.
+#
+# Usage (on the VM, after scripts/oracle-setup.sh, or by hand):
+#   cp .env.example .env        # then fill in SECRET_KEY, POSTGRES_PASSWORD, DOMAIN
+#   docker compose up -d        # backend + db + caddy
+#   docker compose --profile worker up -d   # also start the Celery worker
+#
+# Frontend is NOT in this file — it deploys free on Vercel Hobby
+# (see DEPLOYMENT.md). Point NEXT_PUBLIC_API_URL at https://<DOMAIN>.
+#
+# Nothing here costs money. Postgres, Redis and Caddy are open source;
+# the VM, disk and bandwidth are inside Oracle's Always Free limits.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mmsn}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-mmsn}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mmsn} -d $${POSTGRES_DB:-mmsn}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Compose overrides the image defaults so the stack uses Postgres
+      # on this VM instead of SQLite. (SQLite stays the local-dev
+      # fallback when DATABASE_URL is unset.)
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mmsn}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-mmsn}
+      UPLOAD_DIR: /app/media/uploads
+      MEDIA_DIR: /app/media
+      # PORT must match what Caddy proxies to (see Caddyfile).
+      PORT: "8000"
+      # CELERY_BROKER_URL: leave unset = in-process job queue (default).
+      # Set CELERY_BROKER_URL=redis://redis:6379/0 in .env AND start the
+      # worker profile to run jobs on Celery instead.
+    volumes:
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Optional Celery worker — only runs with `--profile worker`.
+  # Needs CELERY_BROKER_URL=redis://redis:6379/0 in .env. Without it,
+  # jobs run in-process in the backend (default, fine for one user).
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mmsn}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-mmsn}
+      UPLOAD_DIR: /app/media/uploads
+      MEDIA_DIR: /app/media
+      CELERY_BROKER_URL: redis://redis:6379/0
+    volumes:
+      - media:/app/media
+    command: celery -A backend.app.celery_app worker --loglevel=info --concurrency=1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  redis:
+    profiles: ["worker"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+
+  # Reverse proxy with automatic HTTPS (Let's Encrypt). Set DOMAIN in
+  # .env to the domain (or the VM's public IP hostname) you point at
+  # this VM. Caddy serves the backend at https://<DOMAIN> and redirects
+  # http → https. No ports are published by the backend itself.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  media:
+  redisdata:
+  caddy_data:
+  caddy_config:

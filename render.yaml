@@ -1,51 +1,35 @@
-# Render blueprint — deploys backend + frontend from this repo.
-# In the Render dashboard: New → Blueprint → pick the Mmsn repo.
-# Docs: https://render.com/docs/blueprint-spec
+# Render blueprint — $0 DEMO deployment (see DEPLOYMENT.md "Option B").
+#
+# HONEST LIMITS — read before you use this:
+# - The free backend has 512 MB RAM and no persistent disk. It boots and
+#   serves the site, but it CANNOT run Whisper transcription on real videos
+#   (Whisper `tiny` alone wants ~1 GB) — processing jobs will run out of
+#   memory. Keep test videos under ~30 seconds, and expect failures.
+# - Free services sleep after 15 idle minutes (~1 min wake) and all files
+#   + the SQLite database are LOST on every restart/sleep/redeploy.
+# - There is deliberately NO managed Postgres here: Render's free Postgres
+#   expires after 30 days and is then deleted. For data that survives,
+#   paste a free Neon Postgres URL into DATABASE_URL instead
+#   (0.5 GB, 100 CU-hours/mo, no card, no expiry — see DEPLOYMENT.md).
+# - The recommended $0 path that CAN actually process videos is
+#   Option A in DEPLOYMENT.md: Oracle Always Free VM + Vercel frontend
+#   (see docker-compose.yml). This blueprint exists only so the app can
+#   be tried on Render for $0.
 services:
   - type: web
     name: mmsn-backend
     env: docker
     dockerfilePath: ./backend/Dockerfile
-    plan: standard
-    # ^ Deliberately a PAID plan. Free tiers do not have enough RAM/CPU
-    # for Whisper + FFmpeg on real videos — see DEPLOYMENT.md. A free
-    # instance may boot and serve the dashboard, but processing a video
-    # longer than a minute or two will be very slow or run out of memory.
+    plan: free
+    # ^ $0. Do NOT change this to a paid plan here — paid upgrades are
+    # documented separately in DEPLOYMENT.md ("What paid buys").
     envVars:
-      # Phase 3: managed Postgres (see `databases:` below). The app
-      # falls back to SQLite when DATABASE_URL is unset or not a
-      # postgres URL — to stay on SQLite, delete the `databases:`
-      # block and restore this entry to
-      # `value: sqlite:////app/media/mmsn.db` (SQLite lives ON the
-      # persistent disk below, so it survives restarts/redeploys).
-      # Render injects the connection string; the backend normalises
-      # postgres:// to postgresql+psycopg:// (psycopg v3 is in
-      # backend/requirements.txt; psycopg2 is NOT used).
+      # Leave blank = SQLite in the container (lost on restart — see
+      # above). Paste a Neon free Postgres URL here to keep accounts
+      # and projects between restarts.
       - key: DATABASE_URL
-        fromDatabase:
-          name: mmsn-db
-          property: connectionString
-      # Redis (see the mmsn-redis keyvalue service below) is defined
-      # but NOT wired in yet: setting CELERY_BROKER_URL/REDIS_URL
-      # without a Celery worker service would queue jobs no worker
-      # ever runs. Add a worker service (celery -A
-      # backend.app.celery_app worker) and then uncomment:
-      # - key: REDIS_URL
-      #   fromService:
-      #     type: keyvalue
-      #     name: mmsn-redis
-      #     property: connectionString
-      # S3 storage is also opt-in via the dashboard (STORAGE_BACKEND=s3
-      # + S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY/S3_ENDPOINT_URL); the
-      # default stays local files on the disk below.
-      # Same reason: keep uploads on the disk too. MEDIA_DIR already
-      # defaults to ./media (/app/media, on the disk); set explicitly
-      # so a future default change cannot silently move clips off it.
-      - key: UPLOAD_DIR
-        value: /app/media/uploads
-      - key: MEDIA_DIR
-        value: /app/media
-      # REQUIRED (Phase 2, step 1): JWT signing secret. Render generates a
+        sync: false
+      # REQUIRED (Phase 2): JWT signing secret. Render generates a
       # random value on first apply — do not put a real secret in the repo.
       # The backend refuses to start without a secret of >= 32 chars.
       - key: SECRET_KEY
@@ -58,6 +42,12 @@ services:
         value: int8
       - key: CLIPS_PER_PROJECT
         value: "3"
+      # Demo guardrails for a 512 MB instance: short videos only.
+      # Processing a long video here will run out of memory.
+      - key: MAX_VIDEO_SECONDS
+        value: "300"
+      - key: MAX_UPLOAD_MB
+        value: "256"
       - key: YOUTUBE_API_KEY
         sync: false
       - key: OPENAI_API_KEY
@@ -65,10 +55,7 @@ services:
       - key: CORS_ORIGINS
         value: https://mmsn-frontend.onrender.com
     healthCheckPath: /health
-    disk:
-      name: mmsn-media
-      mountPath: /app/media
-      sizeGB: 10
+    # NOTE: no `disk:` — free Render services cannot attach a disk.
 
   - type: web
     name: mmsn-frontend
@@ -79,26 +66,12 @@ services:
       - key: NEXT_PUBLIC_API_URL
         value: https://mmsn-backend.onrender.com
 
-  # Phase 3 — Redis for Celery (CELERY_BROKER_URL / REDIS_URL).
-  # Defined here so it exists when a worker service is added; NOT
-  # wired into the backend yet — see the commented REDIS_URL entry
-  # above. Delete this entry to drop Redis entirely.
-  - type: keyvalue
-    name: mmsn-redis
-    plan: free
-    maxmemoryPolicy: noeviction
-    # ^ Jobs must never be evicted: a queued job evicted from Redis
-    # is only recovered if its DB row is still queued/running at
-    # backend startup (see jobs.recover_interrupted_jobs).
-
-# Phase 3 — managed Postgres (optional: the app runs without it on
-# SQLite + local files + the in-process queue; delete this block and
-# the DATABASE_URL fromDatabase entry above to go back).
-databases:
-  - name: mmsn-db
-    plan: free
-    databaseName: mmsn
-    user: mmsn
-    # Postgres 16. Wired into the backend as DATABASE_URL above.
-    # Free-plan note: Render's free Postgres expires after 90 days —
-    # upgrade the plan before then or move the data.
+# No databases: block here on purpose — Render's free Postgres expires
+# after 30 days. Use Neon free (see DATABASE_URL above) or the Oracle
+# VM path (Postgres in docker-compose.yml) instead.
+#
+# No Redis/Celery worker service here either: background workers have no
+# free instance type on Render, and setting CELERY_BROKER_URL/REDIS_URL
+# without a worker would queue jobs no worker ever runs. Jobs run
+# in-process in the backend (default) and are marked failed — not
+# silently re-run — if the backend restarts.

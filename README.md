@@ -10,11 +10,19 @@ with burned-in word captions.
 > storage + Redis/Celery workers, all config-driven with the
 > SQLite/local/in-process behaviour as the dev fallback), and deploy
 > fixes (backend now listens on Render's injected `PORT`, DB/uploads
-> on the persistent disk, missing OpenCV libs added). Still missing:
-> no payments, no publishing, no live cloud deploy yet (Docker builds
-> and the Render deploy are untested — no daemon/account here; see
-> `DEPLOYMENT.md`). Be honest about that — see `ARCHITECTURE.md` §7
-> for the full gap list.
+> on the persistent disk, missing OpenCV libs added).
+>
+> **Free-tier status (2026-11-16): the default deployment is $0.**
+> Backend + Postgres + files run on one **Oracle Cloud Always Free VM**
+> (`docker-compose.yml`, one-command setup in
+> `scripts/oracle-setup.sh`), frontend free on **Vercel Hobby**.
+> Render free remains a **demo-only** blueprint (`render.yaml`) — it
+> boots but cannot run Whisper on 512 MB. See `FREE_TIER.md` for the
+> research and honest limits, and `DEPLOYMENT.md` for the phone
+> tap-by-tap steps. Still missing: no payments, no publishing, no live
+> cloud deploy yet (Docker builds and all live deploys are untested —
+> no daemon/account here; see `DEPLOYMENT.md`). Be honest about that —
+> see `ARCHITECTURE.md` §7 for the full gap list.
 
 ## Quick start
 
@@ -260,15 +268,23 @@ Manual end-to-end runs from Phase 1/2 are recorded in `TESTING.md`.
 
 ## Deploy
 
-Phase 1 is local-dev only. Production path (not done): Postgres, S3-compatible
-storage, Redis + Celery workers, FFmpeg LGPL build on the worker image,
-`YOUTUBE_API_KEY` as a server secret, real auth. See `ARCHITECTURE.md` §5/§7.
-Auth itself is done (Phase 2, step 1): the only deploy-time auth requirement
-is a `SECRET_KEY` — `render.yaml` auto-generates one for the backend
-(`generateValue: true`); on Railway set it by hand. Rotating it signs
-everyone out. The editor (step 2) and LLM scoring (step 3) need no
-extra deploy-time setup beyond the optional `OPENAI_API_KEY` — see
-`DEPLOYMENT.md`.
+**Default deployment is $0** — see `DEPLOYMENT.md` (phone tap-by-tap)
+and `FREE_TIER.md` (research + honest limits). In short: backend +
+Postgres + files on one **Oracle Cloud Always Free VM** via
+`docker-compose.yml` (setup script `scripts/oracle-setup.sh`), frontend
+free on **Vercel Hobby**. `render.yaml` is a **demo-only** $0 Render
+blueprint — it boots but cannot run Whisper on 512 MB RAM, sleeps after
+15 idle minutes, and loses all data on restart.
+
+Production pieces are done in code (Postgres, S3-compatible storage,
+Redis + Celery workers, FFmpeg LGPL build on the worker image,
+`YOUTUBE_API_KEY` as a server secret, real auth). See `ARCHITECTURE.md`
+§5/§7. Auth itself is done (Phase 2, step 1): the only deploy-time auth
+requirement is a `SECRET_KEY` — `render.yaml` auto-generates one for the
+backend (`generateValue: true`); on the VM the setup script generates
+one; on Railway set it by hand. Rotating it signs everyone out. The
+editor (step 2) and LLM scoring (step 3) need no extra deploy-time
+setup beyond the optional `OPENAI_API_KEY` — see `DEPLOYMENT.md`.
 
 ## Licence
 

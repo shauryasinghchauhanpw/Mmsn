@@ -1,0 +1,9 @@
+# Caddy reverse proxy for the free self-host stack (see docker-compose.yml).
+# Serves the backend at https://<DOMAIN> with automatic HTTPS.
+# DOMAIN comes from the .env file (e.g. DOMAIN=clipper.example.com).
+# If you have no domain, point a free subdomain/DDNS name at the VM's
+# public IP and put that name here — Caddy needs a real hostname for
+# automatic HTTPS; a bare IP address will only serve plain HTTP.
+{$DOMAIN} {
+	reverse_proxy backend:8000
+}

@@ -8,8 +8,11 @@ highlight and shown in the UI (step 3) — plus Phase 3 complete
 (2026-11-16): automated pytest suite in the repo (100 tests), Postgres +
 S3-compatible storage + Redis/Celery workers (config-driven, dev
 fallbacks intact), and deploy fixes (Render `PORT`, DB/uploads on the
-persistent disk). Not a finished SaaS: no payments, no publishing, no
-live cloud deployment yet (see §7 "What Phase 1 is NOT").
+persistent disk) — plus the free-tier reconfiguration (2026-11-16):
+the default deployment is $0 (Oracle Always Free VM + Vercel Hobby;
+Render free is demo-only — see `FREE_TIER.md` and `DEPLOYMENT.md`).
+Not a finished SaaS: no payments, no publishing, no live cloud
+deployment yet (see §7 "What Phase 1 is NOT").
 
 Full component research (licences, alternatives, verdicts) lives in
 [`research.md`](research.md). This file is the final stack decision.
@@ -61,7 +64,7 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
 | **YouTube Data API v3** (link-paste metadata only) | Free, quota-capped: 10,000 units/day default; `videos.list` = 1 unit/call. Needs a Google Cloud API key (`YOUTUBE_API_KEY`). **Without the key the link path returns a clear "not configured — upload instead" response; it never fakes metadata.** Quota cannot be bought. |
 | LLM highlight scoring (optional) | Paid, BYO key (`OPENAI_API_KEY`, OpenAI-compatible endpoint). Phase 1 works without it (heuristic scorer). |
 | Diarization weights (optional, later) | Free but Hugging Face-gated: accept terms + HF token; CC-BY-4.0 attribution for community-1 weights. |
-| Hosting / Postgres / S3 (production) | Paid cloud costs, TBD at deploy time. |
+| Hosting / Postgres / S3 (production) | **$0 default** (see `FREE_TIER.md` / `DEPLOYMENT.md`): backend + Postgres + files on one Oracle Cloud Always Free VM (`docker-compose.yml`), frontend free on Vercel Hobby. Render free is demo-only (512 MB RAM cannot run Whisper). Paid upgrades are optional, never the default: Render Standard backend + disk ~$25/mo + ~$2.50/mo, bigger VPS from ~$5/mo, R2/S3 storage, OpenAI key (LLM scoring only). |
 | Remotion (deferred) | Paid "Automators" tier if ever adopted. Not used in Phase 1. |
 
 ## 4. Ingestion rules (standing decisions — do not change without the user)
@@ -136,9 +139,11 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
   against a moto mock S3 server (NOT real AWS S3): upload → process
   (materialise/publish wrapper) → presigned downloads → thumbnail,
   plus a re-render publishing a new versioned object and deleting the
-  old one. Real AWS S3 / R2 / MinIO, a Render Postgres/Redis deploy,
-  and Docker builds are still unverified — the first real deploy is
-  the test for those.
+  old one. Real AWS S3 / R2 / MinIO, a live Oracle VM / Vercel deploy, a
+  live Render deploy, and Docker builds are still unverified — the first
+  real deploy is the test for those. (Free-tier decision, 2026-11-16:
+  the default deploy is the Oracle Always Free VM + Vercel, both $0 —
+  see `FREE_TIER.md` and `DEPLOYMENT.md`. Render free is demo-only.)
 
 ## 5b. Storage — local files (dev) vs S3-compatible (Phase 3)
 
