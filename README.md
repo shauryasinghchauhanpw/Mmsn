@@ -12,18 +12,29 @@ with burned-in word captions.
 > fixes (backend now listens on Render's injected `PORT`, DB/uploads
 > on the persistent disk, missing OpenCV libs added).
 >
-> **Free-tier status (2026-11-16): the default deployment is $0.**
-> Backend + Postgres + files run on one **Oracle Cloud Always Free VM**
-> (`docker-compose.yml`, one-command setup in
-> `scripts/oracle-setup.sh`), frontend free on **Vercel Hobby**.
-> Render free remains a **demo-only** blueprint (`render.yaml`) — it
-> boots but cannot run Whisper on 512 MB. See `FREE_TIER.md` for the
-> research and honest limits, and `DEPLOYMENT.md` for the phone
-> tap-by-tap steps. Also evaluated in `FREE_TIER.md`: **GitHub Pages
-> cannot host this app** (static-only, and its terms forbid running a
-> commercial SaaS on it), and **Coolify/Dokploy on the same Oracle VM
-> is $0 total** but not the default — direct Docker Compose is simpler
-> for one app. Still missing: no payments, no publishing, no live
+> **Free-tier status (2026-11-16): the default deployment is $0 and
+> needs NO card.** Backend + frontend run on **Render free**
+> (`render.yaml`), transcription runs on **Groq's free Whisper API**
+> (free key, no card, 8 h audio/day, word-level timestamps), and the
+> blueprint turns on the low-memory switches (`TRANSCRIPTION_PROVIDER=
+> groq`, `RENDER_PRESET=ultrafast`, `FACE_TRACKING=0`) so a full job
+> fits in 512 MB — measured peak **388 MB** (see `TESTING.md`). The
+> trade-offs: `ultrafast` renders, centre crop instead of
+> face-following, audio sent to Groq, sleep after 15 idle minutes, no
+> persistent disk. Oracle Always Free VM + Vercel is now Appendix D,
+> not the default — it needs a Visa/Mastercard for verification and
+> this user only has RuPay (domestic-only, rejected), and he cannot
+> get a Visa/Mastercard. See `FREE_TIER.md` for the research and
+> honest limits, and `DEPLOYMENT.md` for the phone tap-by-tap steps.
+> Also evaluated in `FREE_TIER.md`: **GitHub Pages cannot host this
+> app** (static-only, and its terms forbid running a commercial SaaS
+> on it), and **Coolify/Dokploy on the same Oracle VM is $0 total**
+> but not the default — direct Docker Compose is simpler for one app.
+> **Hugging Face Spaces cannot host this app free** (its own docs:
+> creating a Docker/Gradio Space needs PRO $9/mo; free ZeroGPU is
+> Gradio-only). The fallback ladder is in `FREE_TIER.md` ("No card?
+> The RuPay problem") and `DEPLOYMENT.md` Option B (Railway 30-day
+> trial, if open). Still missing: no payments, no publishing, no live
 > cloud deploy yet (Docker builds and all live deploys are untested —
 > no daemon/account here; see `DEPLOYMENT.md`). Be honest about that —
 > see `ARCHITECTURE.md` §7 for the full gap list.
@@ -272,13 +283,17 @@ Manual end-to-end runs from Phase 1/2 are recorded in `TESTING.md`.
 
 ## Deploy
 
-**Default deployment is $0** — see `DEPLOYMENT.md` (phone tap-by-tap)
-and `FREE_TIER.md` (research + honest limits). In short: backend +
-Postgres + files on one **Oracle Cloud Always Free VM** via
-`docker-compose.yml` (setup script `scripts/oracle-setup.sh`), frontend
-free on **Vercel Hobby**. `render.yaml` is a **demo-only** $0 Render
-blueprint — it boots but cannot run Whisper on 512 MB RAM, sleeps after
-15 idle minutes, and loses all data on restart.
+**Default deployment is $0 and needs no card** — see `DEPLOYMENT.md`
+(phone tap-by-tap) and `FREE_TIER.md` (research + honest limits). In
+short: backend + frontend on **Render free** via `render.yaml`, with
+transcription on **Groq's free Whisper API** (free key, no card) and
+the low-memory switches on (`TRANSCRIPTION_PROVIDER=groq`,
+`RENDER_PRESET=ultrafast`, `FACE_TRACKING=0`) so a full job fits in
+512 MB (measured peak 388 MB). It sleeps after 15 idle minutes and
+loses all data on restart (add a free Neon Postgres URL for accounts
+that survive). Oracle Always Free VM + Vercel Hobby is now Appendix D
+in `DEPLOYMENT.md` — the best free path for anyone with a
+Visa/Mastercard, but not available to this user (RuPay only).
 
 Production pieces are done in code (Postgres, S3-compatible storage,
 Redis + Celery workers, FFmpeg LGPL build on the worker image,

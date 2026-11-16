@@ -1,20 +1,30 @@
-# Render blueprint — $0 DEMO deployment (see DEPLOYMENT.md "Option B").
+# Render blueprint — $0 deployment, NO CARD (see DEPLOYMENT.md "Option A").
+#
+# HOW THIS WORKS FOR $0: transcription is offloaded to Groq's free
+# Whisper API (TRANSCRIPTION_PROVIDER=groq, free key, no card), so the
+# backend only needs RAM for FastAPI + FFmpeg + OpenCV — which fits in
+# the free instance's 512 MB. Local faster-whisper would need ~1 GB and
+# would OOM here; that is why the provider switch exists. Without a
+# GROQ_API_KEY this blueprint is a demo only (site boots, jobs fail).
 #
 # HONEST LIMITS — read before you use this:
-# - The free backend has 512 MB RAM and no persistent disk. It boots and
-#   serves the site, but it CANNOT run Whisper transcription on real videos
-#   (Whisper `tiny` alone wants ~1 GB) — processing jobs will run out of
-#   memory. Keep test videos under ~30 seconds, and expect failures.
+# - The free backend has 512 MB RAM and no persistent disk. Keep test
+#   videos short (the blueprint caps uploads at 256 MB / 5-minute
+#   videos); long videos may still run out of memory while rendering.
 # - Free services sleep after 15 idle minutes (~1 min wake) and all files
 #   + the SQLite database are LOST on every restart/sleep/redeploy.
 # - There is deliberately NO managed Postgres here: Render's free Postgres
 #   expires after 30 days and is then deleted. For data that survives,
 #   paste a free Neon Postgres URL into DATABASE_URL instead
 #   (0.5 GB, 100 CU-hours/mo, no card, no expiry — see DEPLOYMENT.md).
-# - The recommended $0 path that CAN actually process videos is
-#   Option A in DEPLOYMENT.md: Oracle Always Free VM + Vercel frontend
-#   (see docker-compose.yml). This blueprint exists only so the app can
-#   be tried on Render for $0.
+# - Groq's free plan: 8 hours of audio/day, 20 requests/min, 25 MB/file
+#   (the backend chunks longer audio automatically). If Groq's free tier
+#   ever changes or the key hits its daily quota, jobs fail with a clear
+#   "Groq rate limit" message — nothing is faked.
+# - The permanent $0 path with local transcription (no third-party API)
+#   is the Oracle Always Free VM (DEPLOYMENT.md, appendix) — but it
+#   needs a Visa/Mastercard for verification, which this user does not
+#   have (RuPay only). This blueprint is the no-card default instead.
 services:
   - type: web
     name: mmsn-backend
@@ -34,16 +44,53 @@ services:
       # The backend refuses to start without a secret of >= 32 chars.
       - key: SECRET_KEY
         generateValue: true
+      # Transcription provider: "groq" (default on this blueprint) —
+      # Groq's hosted Whisper large-v3-turbo, free plan, no card.
+      # Without GROQ_API_KEY, jobs fail with a clear message (demo
+      # only). Set it to "local" to use faster-whisper instead — but
+      # local Whisper needs ~1 GB RAM and WILL run out of memory on
+      # this 512 MB free instance, so do not do that here.
+      - key: TRANSCRIPTION_PROVIDER
+        value: groq
+      # REQUIRED for real processing on this blueprint: free Groq API
+      # key (console.groq.com → API Keys, no card). Paste it in the
+      # Render dashboard after first apply (sync: false = you fill
+      # it in, it is never stored in the repo).
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: whisper-large-v3-turbo
+      # Local Whisper settings — IGNORED while the provider is groq.
+      # Kept so switching TRANSCRIPTION_PROVIDER back to "local" on a
+      # bigger machine still works without another edit.
       - key: WHISPER_MODEL
         value: tiny
       - key: WHISPER_DEVICE
         value: cpu
       - key: WHISPER_COMPUTE_TYPE
         value: int8
+      # Render preset: "ultrafast" on this 512 MB instance ON PURPOSE.
+      # At 1080x1920 the render child peaks at ~418 MB with the default
+      # "veryfast" but ~210 MB with "ultrafast" (measured 2026-11-16);
+      # with "veryfast" the job + backend together peak at ~721 MB and
+      # the container is OOM-killed. "ultrafast" is lower quality per
+      # bit, but it is what makes this free deploy actually finish a
+      # job. Anything bigger than free keeps the "veryfast" default.
+      - key: RENDER_PRESET
+        value: ultrafast
+      # Face tracking OFF on this 512 MB instance ON PURPOSE. The YuNet
+      # tracker decodes frames in-process (~180 MB peak); with it on,
+      # the job + backend peak at ~569 MB even with "ultrafast" and the
+      # container is OOM-killed. With it off the crop is centred
+      # (the same fallback as "no face found") and the job fits.
+      # Anything bigger than free keeps face tracking on.
+      - key: FACE_TRACKING
+        value: "0"
       - key: CLIPS_PER_PROJECT
         value: "3"
-      # Demo guardrails for a 512 MB instance: short videos only.
-      # Processing a long video here will run out of memory.
+      # Guardrails for a 512 MB instance: short videos only.
+      # Processing a long video here may still run out of memory
+      # while FFmpeg renders the 1080x1920 clips.
       - key: MAX_VIDEO_SECONDS
         value: "300"
       - key: MAX_UPLOAD_MB

@@ -20,6 +20,7 @@ from ..app.models import Clip, Highlight, Job, Project, Transcript
 from .audio import extract_audio, probe_duration
 from .captions import write_ass  # noqa: F401  (kept for direct use/tests)
 from .highlights import detect_highlights
+from .memory import trim_memory
 from .reframe import face_track_for_clip
 from .render import render_clip
 from .scenes import detect_scenes, snap_to_scene
@@ -75,9 +76,15 @@ def run_pipeline(job_id: int, project_id: int, session_factory):
         # 2. Transcription (10-50%)
         _progress(job_id, 20)
         try:
-            result = transcribe(wav_path, model_name=settings.whisper_model,
-                                device=settings.whisper_device,
-                                compute_type=settings.whisper_compute_type)
+            result = transcribe(
+                wav_path, model_name=settings.whisper_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+                provider=settings.transcription_provider,
+                groq_api_key=settings.groq_api_key,
+                groq_model=settings.groq_model,
+                groq_base_url=settings.groq_base_url,
+                groq_max_chunk_seconds=settings.groq_max_chunk_seconds)
         except TranscriptionUnavailableError as exc:
             _fail(job_id, project_id, db, str(exc))
             return
@@ -109,6 +116,11 @@ def run_pipeline(job_id: int, project_id: int, session_factory):
         # 4. Scene detection (best-effort) + snap boundaries
         scenes = detect_scenes(project.source_path)
         all_words = [w for s in result["segments"] for w in s.get("words", [])]
+        # Give memory back before rendering: face tracking + scene
+        # detection decoded frames in-process and the render child
+        # needs the room (see backend/pipeline/memory.py). On a 512 MB
+        # host this is worth ~50 MB of headroom for the FFmpeg child.
+        trim_memory()
 
         # 5. Render clips (60-95%)
         rendered = 0
@@ -125,13 +137,18 @@ def run_pipeline(job_id: int, project_id: int, session_factory):
             db.refresh(hl)
 
             # Face-tracked reframe (YuNet + smoothing + cut resets);
-            # empty track -> centre crop inside render_clip.
-            face_track = face_track_for_clip(project.source_path, start, end,
-                                             scenes)
+            # empty track -> centre crop inside render_clip. Skipped
+            # entirely when FACE_TRACKING=0 (low-memory hosts): the
+            # tracker decodes frames in-process (~180 MB peak), which
+            # a 512 MB host cannot spare next to the render child.
+            face_track = (face_track_for_clip(
+                project.source_path, start, end, scenes)
+                if settings.face_tracking else [])
             out_path = os.path.join(work_dir, f"clip_{hl.id}.mp4")
             try:
                 render_clip(project.source_path, start, end, all_words,
-                            out_path, face_track=face_track, scenes=scenes)
+                            out_path, face_track=face_track, scenes=scenes,
+                            preset=settings.render_preset)
             except Exception as exc:
                 logger.warning("Clip %s render failed: %s", hl.id, exc)
                 continue

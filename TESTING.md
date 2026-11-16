@@ -445,6 +445,8 @@ python -m pytest backend/tests                  # full suite
 | Fast suite (`-m "not slow"`) — 96 tests | ✅ **96 passed**, 4 deselected | **41.95 s** |
 | Full suite — 100 tests | ✅ **100 passed** | **429.39 s (7:09)** |
 | Slow-only re-run (`-m slow`) — 4 tests, with `--durations=10` | ✅ **4 passed** | **499.66 s (8:19)** |
+| Fast suite after Groq + low-memory work — 110 tests | ✅ **110 passed**, 4 deselected | **52.90 s** |
+| Full suite after Groq + low-memory work — 114 tests | ✅ **114 passed** | **409.32 s (6:49)** |
 
 **Coordinator re-run (after all three Phase 3 pieces landed, same
 code as pushed):** fast suite ✅ **96 passed**, 4 deselected,
@@ -453,9 +455,17 @@ This re-run covers the final merged code — including the Postgres /
 S3 / Celery hardening and the deploy fixes — not just the suite as
 it stood when it was first written.
 
-Tests per file (100 total): `test_auth.py` 25, `test_editor.py` 23,
+**No-card rework re-run (2026-11-16, after the Groq provider, render
+preset, face-tracking switch, and memory-trim work landed, same code
+as pushed):** fast suite ✅ **110 passed**, 4 deselected, **52.90 s**;
+full suite ✅ **114 passed**, **409.32 s (6:49)**. The 14 new tests
+are `test_groq_transcribe.py` (10) and `test_render_preset.py` (4);
+nothing else changed in the suite.
+
+Tests per file (114 total): `test_auth.py` 25, `test_editor.py` 23,
 `test_llm_scoring.py` 5, `test_pipeline_e2e.py` 6,
-`test_units.py` 41.
+`test_units.py` 41, `test_groq_transcribe.py` 10,
+`test_render_preset.py` 4.
 
 Slow-test timings (from the slow-only re-run; the full-suite run was
 faster overall because the shared `processed_project` fixture is
@@ -504,6 +514,23 @@ download byte-identical to disk → transcript with word timestamps
   dummy model name; mock 500 → `"heuristic"` with the
   "LLM scoring unavailable" reason, matching the no-config run;
   empty API key → heuristic with no request sent.
+- **Groq transcription (`test_groq_transcribe.py`, 10 tests, mock
+  Groq server on 127.0.0.1 — no real key, no real API call):**
+  success with word timestamps (asserts the mock got the model +
+  `verbose_json` + `timestamp_granularities`); chunking (660 s WAV →
+  exactly 2 requests, second chunk's words shifted by 600 s);
+  401/429/500/empty-transcript/missing-key all raise
+  `TranscriptionUnavailableError` with a clear message; provider
+  routing (`provider="groq"` uses the mock, `provider="nope"`
+  errors). One test bug fixed during the run: the mock expects path
+  `/openai/v1/audio/transcriptions`, so tests pass
+  `base_url=f"{base}/openai/v1"` (mirrors the real `GROQ_BASE_URL`).
+- **Render preset / face-tracking switch (`test_render_preset.py`,
+  4 tests):** `render_clip(preset="ultrafast")` produces a real
+  1080×1920 H.264 clip from a 3 s generated video; `Settings().render_preset`
+  keeps known values and falls back to `"veryfast"` on an unknown
+  value; `Settings().face_tracking` parses `0/false/no/off` → False,
+  `1/true/yes/on` → True, default True.
 
 ### One conversion bug found (test was wrong, app was right)
 
@@ -529,6 +556,50 @@ from the installed libraries. All pre-existing; none fail a test.
   track only), long videos (>10 min), concurrent jobs, and any
   phone-browser / frontend interaction. The suite is API + pipeline
   level only.
+- **A real Groq API key run** — the Groq tests use a local mock
+  server only. The first real-key run is the live-deploy test.
+
+## Memory measurements — does it fit in 512 MB? (2026-11-16)
+
+Question: can the backend run on Render free (512 MB RAM) if
+transcription is offloaded to Groq? Measured on this VM with
+concurrent RSS sampling (backend process + live descendant
+ffmpeg/ffprobe RSS, every 100 ms, max sum) during a full pipeline
+run on the generated 66 s test video → 3 clips, 1080×1920. Earlier
+`RUSAGE_CHILDREN` numbers were misleading (a 1,222 MB child peak
+came from the **test-video generation** step, testsrc + flite, not
+the pipeline); `/proc/<pid>/status` polling was used for
+per-command peaks.
+
+Per-command peaks (polling): `extract_audio` ffmpeg 47–50 MB;
+`render_clip` ffmpeg **418 MB** (`veryfast`, 1080×1920, centre crop
++ ASS captions); plain re-encode no filters 225 MB; crop+scale only
+(no ASS) 392 MB — the `scale=1080:1920` upscale is the main hog;
+ASS-only 242 MB; `threads=1` barely helps (399 MB), `superfast`
+352 MB, **`ultrafast` + threads 1: 210 MB**; 720×1280 `veryfast`:
+247 MB. ffprobe ~27 MB. Backend import alone: 84 MB peak. Face
+tracking adds ~178 MB in-process (13 → 191 MB in isolation test);
+scene detection ~+30 MB; `malloc_trim` after those steps: current
+RSS 221 → 172 MB (~50 MB back).
+
+Concurrent totals (full 66 s job → 3 clips):
+
+| Configuration | Peak (backend + live children) | Fits 512 MB? |
+|---|---|---|
+| Local Whisper + `veryfast` + face tracking | ~721 MB | ❌ No |
+| Groq + `veryfast` + face tracking | ~721 MB | ❌ No — transcription was never the only problem |
+| Groq + `ultrafast` + face tracking (+ trim) | ~569 MB | ❌ No |
+| Groq + `ultrafast` + face tracking **off** (+ trim) | **~388 MB** | ✅ Yes — ~124 MB headroom |
+
+**Caveats (read before trusting the 388 MB number):** this is a
+local measurement — no Docker/cgroup cap could be enforced in this
+VM (no Docker daemon; `/sys/fs/cgroup` not writable for limits;
+`systemd-run` cannot connect to bus) to prove the 512 MB limit
+directly; it used the synthetic test video; the real uvicorn server
+adds some overhead on top. Longer videos near the 5-minute cap can
+still push it over. Headroom is real but not huge. The first live
+Render free deploy is the real test — if a job OOMs, the fix is a
+shorter video first, then the Railway trial (1 GB) as the fallback.
 - The editor chain test runs against the first clip of the shared
   processed project, and the e2e assertions are written to hold
   whether that clip is at version 1 or version 7 — but if the chain

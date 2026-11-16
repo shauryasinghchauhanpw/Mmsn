@@ -8,9 +8,10 @@ highlight and shown in the UI (step 3) — plus Phase 3 complete
 (2026-11-16): automated pytest suite in the repo (100 tests), Postgres +
 S3-compatible storage + Redis/Celery workers (config-driven, dev
 fallbacks intact), and deploy fixes (Render `PORT`, DB/uploads on the
-persistent disk) — plus the free-tier reconfiguration (2026-11-16):
-the default deployment is $0 (Oracle Always Free VM + Vercel Hobby;
-Render free is demo-only — see `FREE_TIER.md` and `DEPLOYMENT.md`).
+persistent disk) — plus the free-tier reconfiguration (2026-11-16, revised same day):
+the default deployment is $0 and needs no card (Render free + Groq's
+free Whisper API; Oracle Always Free VM + Vercel is now Appendix D —
+see `FREE_TIER.md` and `DEPLOYMENT.md`).
 Not a finished SaaS: no payments, no publishing, no live cloud
 deployment yet (see §7 "What Phase 1 is NOT").
 
@@ -40,7 +41,7 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
 | Frontend | **Next.js 14 (App Router) + React 18 + TypeScript + Tailwind CSS 3**, dark theme | One deployable web app, server components where useful, typed API client; Tailwind for fast dark UI. No framework lock-in for the video work — the browser never renders video, the backend does. |
 | Backend | **Python 3.12 + FastAPI + Uvicorn** | Typed, async-friendly, OpenAPI docs for free (`/docs`); Python is where the ML/video libs live. |
 | Video render/cut/crop/encode | **FFmpeg 8.x directly via subprocess (LGPL build)** | Fastest option; native C, multithreaded. MoviePy was rejected as the render core (3–4× slower, documented memory leaks / zombie subprocesses on long batch jobs — see research §5). |
-| Transcription | **faster-whisper** (`word_timestamps=True`, VAD on), model `tiny` locally / `small` or `large-v3-turbo` in prod | ~4× faster than reference Whisper at same accuracy, CPU-usable (int8). WhisperX is the optional upgrade for accurate word alignment. **stable-ts was evaluated 2026-11-16 and rejected for Phase 1**: it genuinely improves word timestamps, but pulls torch 2.15 + torchaudio + CUDA toolkit — gigabytes, incompatible with the light CPU-only build and free-tier hosting (see research §14). |
+| Transcription | **faster-whisper** (`word_timestamps=True`, VAD on), model `tiny` locally / `small` or `large-v3-turbo` in prod — **or Groq's hosted Whisper `large-v3-turbo` API** (`TRANSCRIPTION_PROVIDER=groq`) | ~4× faster than reference Whisper at same accuracy, CPU-usable (int8). WhisperX is the optional upgrade for accurate word alignment. **stable-ts was evaluated 2026-11-16 and rejected for Phase 1**: it genuinely improves word timestamps, but pulls torch 2.15 + torchaudio + CUDA toolkit — gigabytes, incompatible with the light CPU-only build and free-tier hosting (see research §14). **Groq provider (added 2026-11-16):** free plan, no card, word-level timestamps via `verbose_json` + `timestamp_granularities=["word","segment"]`, 8 h audio/day, 25 MB/file (audio is chunked automatically). It is what makes the no-card Render free deploy work: with transcription offloaded, the backend fits in 512 MB. Audio is sent to Groq's API in this mode (free plan: zero data retention as a self-serve setting). Default stays `local`. |
 | Highlight scoring | **Transcript-based scoring: heuristic by default, optional LLM** | The LLM only ever sees transcript text — video/audio are never sent to an LLM. The deterministic heuristic scorer (hook density, question/emphasis cues, energy proxy, position) runs with zero API keys; when `OPENAI_API_KEY` is set, `score_highlights_llm()` (OpenAI-compatible `/chat/completions`) runs instead and falls back to the heuristic on any failure, saying so in the reasons. `detect_highlights()` returns `(highlights, scorer)` and `runner.py` stores `scorer` (`"llm"` \| `"heuristic"`) on each `Highlight` — the UI shows exactly that value, so it can never claim LLM scoring when the heuristic ran. Verified with a local mock server only (see §10); no real OpenAI key has been tested. Virality score is 0–100 with reasons listed per clip. |
 | Diarization | **Optional, off by default** — WhisperX + pyannote.audio | Only useful for multi-speaker content. Weights are Hugging Face-gated and CC-BY-4.0 (community-1); never bundle them. Not installed in Phase 1. |
 | Scene detection | **PySceneDetect (headless)** — optional hook | Snaps clip boundaries to real cuts; resets face-tracking at cuts. Optional: the pipeline works without it and logs a warning. |
@@ -64,7 +65,7 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
 | **YouTube Data API v3** (link-paste metadata only) | Free, quota-capped: 10,000 units/day default; `videos.list` = 1 unit/call. Needs a Google Cloud API key (`YOUTUBE_API_KEY`). **Without the key the link path returns a clear "not configured — upload instead" response; it never fakes metadata.** Quota cannot be bought. |
 | LLM highlight scoring (optional) | Paid, BYO key (`OPENAI_API_KEY`, OpenAI-compatible endpoint). Phase 1 works without it (heuristic scorer). |
 | Diarization weights (optional, later) | Free but Hugging Face-gated: accept terms + HF token; CC-BY-4.0 attribution for community-1 weights. |
-| Hosting / Postgres / S3 (production) | **$0 default** (see `FREE_TIER.md` / `DEPLOYMENT.md`): backend + Postgres + files on one Oracle Cloud Always Free VM (`docker-compose.yml`), frontend free on Vercel Hobby. Render free is demo-only (512 MB RAM cannot run Whisper). GitHub Pages cannot host this app (static-only; terms forbid a commercial SaaS). Coolify/Dokploy on the same VM is a $0 alternative, not the default. Paid upgrades are optional, never the default: Render Standard backend + disk ~$25/mo + ~$2.50/mo, bigger VPS from ~$5/mo, R2/S3 storage, OpenAI key (LLM scoring only). |
+| Hosting / Postgres / S3 (production) | **$0 default, no card** (see `FREE_TIER.md` / `DEPLOYMENT.md`): backend + frontend on Render free (`render.yaml`), transcription on Groq's free Whisper API, low-memory switches on (`TRANSCRIPTION_PROVIDER=groq`, `RENDER_PRESET=ultrafast`, `FACE_TRACKING=0`) — measured full-job peak **388 MB**, inside Render free's 512 MB. GitHub Pages cannot host this app (static-only; terms forbid a commercial SaaS). Oracle Always Free VM + Vercel is Appendix D — the best free path for anyone with a Visa/Mastercard, but not available to this user (RuPay only, rejected; cannot get a Visa/Mastercard). Hugging Face Spaces cannot host this app free (HF's own docs: Docker/Gradio Space creation needs PRO $9/mo; free ZeroGPU is Gradio-only). Fallback ladder: Railway's 30-day trial (if open) → a Visa/Mastercard debit card from the bank → Oracle. Paid upgrades are optional, never the default: Render Standard backend + disk ~$25/mo + ~$2.50/mo, bigger VPS from ~$5/mo, R2/S3 storage, OpenAI key (LLM scoring only). |
 | Remotion (deferred) | Paid "Automators" tier if ever adopted. Not used in Phase 1. |
 
 ## 4. Ingestion rules (standing decisions — do not change without the user)
@@ -141,9 +142,10 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
   plus a re-render publishing a new versioned object and deleting the
   old one. Real AWS S3 / R2 / MinIO, a live Oracle VM / Vercel deploy, a
   live Render deploy, and Docker builds are still unverified — the first
-  real deploy is the test for those. (Free-tier decision, 2026-11-16:
-  the default deploy is the Oracle Always Free VM + Vercel, both $0 —
-  see `FREE_TIER.md` and `DEPLOYMENT.md`. Render free is demo-only.)
+  real deploy is the test for those. (Free-tier decision, 2026-11-16,
+  revised same day: the default deploy is Render free + Groq's free
+  Whisper API, both $0 and no card — see `FREE_TIER.md` and
+  `DEPLOYMENT.md`. Oracle Always Free VM + Vercel is Appendix D.)
 
 ## 5b. Storage — local files (dev) vs S3-compatible (Phase 3)
 
@@ -181,8 +183,8 @@ reframe → caption burn-in → MP4 export. Clips are stored as files under
   Postgres so idle-timeout connections recycle instead of failing a
   request. In production the Postgres URL comes from the deployment:
   `docker-compose.yml` wires the `db` container into the backend
-  (Option A, Oracle VM), or a free Neon Postgres URL is pasted in
-  (Option B). The old `render.yaml` managed Postgres service
+  (Appendix D, Oracle VM), or a free Neon Postgres URL is pasted in
+  (Option A, Render free). The old `render.yaml` managed Postgres service
   (`mmsn-db`) was removed in the free-tier change (2026-11-16) —
   Render's free Postgres expires after 30 days. Deleting the Postgres
   wiring falls back to SQLite (the code default).

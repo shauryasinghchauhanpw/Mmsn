@@ -33,6 +33,7 @@ from ..app.jobs import update_job
 from ..app.models import Clip, Highlight, Project, Transcript
 from .audio import probe_duration
 from .captions import CAPTION_STYLES, DEFAULT_STYLE, group_words
+from .memory import trim_memory
 from .reframe import face_track_for_clip
 from .render import render_clip
 from .scenes import detect_scenes
@@ -204,8 +205,12 @@ def run_rerender(job_id: int, clip_id: int, session_factory):
 
         # Scene detection (best-effort) + face track for the new window.
         scenes = detect_scenes(project.source_path)
-        face_track = face_track_for_clip(project.source_path, abs_start,
-                                         abs_end, scenes)
+        face_track = (face_track_for_clip(
+            project.source_path, abs_start, abs_end, scenes)
+            if settings.face_tracking else [])
+        # Hand memory back before the render child starts (see
+        # backend/pipeline/memory.py) — same reason as in runner.py.
+        trim_memory()
         update_job(job_id, progress=40)
 
         work_dir = os.path.dirname(clip.path)
@@ -218,7 +223,8 @@ def run_rerender(job_id: int, clip_id: int, session_factory):
             render_clip(project.source_path, abs_start, abs_end, words,
                         out_path, face_track=face_track, scenes=scenes,
                         volume=params["volume"], style=params["style"],
-                        framing_offset=params["framing_offset"])
+                        framing_offset=params["framing_offset"],
+                        preset=settings.render_preset)
         except Exception as exc:
             _fail(job_id, clip_id, db, f"Render failed: {exc}")
             return

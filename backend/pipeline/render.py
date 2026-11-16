@@ -30,7 +30,8 @@ def _escape_filter_path(path: str) -> str:
 
 def _render_segment(source_path: str, start: float, end: float,
                     ass_path: str | None, out_path: str,
-                    center_x: float | None, volume: float = 1.0) -> None:
+                    center_x: float | None, volume: float = 1.0,
+                    preset: str = "veryfast") -> None:
     vf = vertical_filter(center_x)
     if ass_path and os.path.exists(ass_path):
         vf += f",ass='{_escape_filter_path(ass_path)}'"
@@ -39,7 +40,7 @@ def _render_segment(source_path: str, start: float, end: float,
            "-vf", vf]
     if volume != 1.0:
         cmd += ["-af", f"volume={volume}"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    cmd += ["-c:v", "libx264", "-preset", preset, "-crf", "23",
             "-pix_fmt", "yuv420p", "-r", "30",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart", out_path]
@@ -49,7 +50,8 @@ def _render_segment(source_path: str, start: float, end: float,
             f"Clip render failed: {result.stderr.strip()[:500]}")
 
 
-def _concat_segments(segment_paths: list[str], out_path: str) -> None:
+def _concat_segments(segment_paths: list[str], out_path: str,
+                     preset: str = "veryfast") -> None:
     list_path = out_path + ".concat.txt"
     with open(list_path, "w", encoding="utf-8") as f:
         for p in segment_paths:
@@ -60,7 +62,7 @@ def _concat_segments(segment_paths: list[str], out_path: str) -> None:
         # Fallback: re-encode concat (handles any timestamp mismatch).
         result = run(["ffmpeg", "-y", "-v", "error", "-f", "concat",
                       "-safe", "0", "-i", list_path,
-                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                      "-c:v", "libx264", "-preset", preset, "-crf", "23",
                       "-c:a", "aac", out_path])
     if result.returncode != 0 or not os.path.exists(out_path):
         raise FFmpegError(
@@ -72,7 +74,8 @@ def render_clip(source_path: str, start: float, end: float,
                 face_track=None, scenes=None,
                 width: int = 1080, height: int = 1920,
                 volume: float = 1.0, style: str = "karaoke",
-                framing_offset: float = 0.0) -> str:
+                framing_offset: float = 0.0,
+                preset: str = "veryfast") -> str:
     """Render one vertical clip. `words` are absolute-time word dicts for
     captions; `face_track` is a smoothed [(t, center_x)] list (may be
     empty -> centre crop); `scenes` are (start, end) spans used as
@@ -87,6 +90,12 @@ def render_clip(source_path: str, start: float, end: float,
       framing_offset horizontal nudge added to the face-track median
                      centre, -1..1, clamped to 0..1. With no face track
                      it nudges the centre crop instead (0.5 + offset).
+      preset         x264 preset ("veryfast" default). This is a memory
+                     knob as well as a speed/quality knob: at 1080x1920
+                     the render child peaks at ~418 MB with "veryfast"
+                     but ~210 MB with "ultrafast" (measured 2026-11-16)
+                     — the Render free deploy sets "ultrafast" so the
+                     job fits in 512 MB alongside the backend process.
     """
     work_dir = os.path.dirname(out_path)
     # Segment boundaries: scene cuts strictly inside the window.
@@ -113,7 +122,7 @@ def render_clip(source_path: str, start: float, end: float,
             write_ass(words, seg_start, seg_end, ass_path, style=style)
         seg_path = os.path.join(work_dir, f".seg{i}.mp4")
         _render_segment(source_path, seg_start, seg_end, ass_path,
-                        seg_path, center_x, volume=volume)
+                        seg_path, center_x, volume=volume, preset=preset)
         segment_paths.append(seg_path)
         if ass_path and os.path.exists(ass_path):
             os.remove(ass_path)
@@ -121,7 +130,7 @@ def render_clip(source_path: str, start: float, end: float,
     if len(segment_paths) == 1:
         os.replace(segment_paths[0], out_path)
     else:
-        _concat_segments(segment_paths, out_path)
+        _concat_segments(segment_paths, out_path, preset=preset)
         for p in segment_paths:
             if os.path.exists(p):
                 os.remove(p)

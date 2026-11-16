@@ -28,6 +28,24 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+_X264_PRESETS = frozenset({
+    "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
+    "slow", "slower", "veryslow", "placebo",
+})
+
+
+def _render_preset() -> str:
+    preset = os.environ.get("RENDER_PRESET", "veryfast").strip().lower()
+    return preset if preset in _X264_PRESETS else "veryfast"
+
+
 @dataclass
 class Settings:
     database_url: str = field(default_factory=lambda: os.environ.get(
@@ -44,6 +62,44 @@ class Settings:
         "WHISPER_DEVICE", "cpu"))
     whisper_compute_type: str = field(default_factory=lambda: os.environ.get(
         "WHISPER_COMPUTE_TYPE", "int8"))
+    # ── Transcription provider ──────────────────────────────────────────
+    # "local" (default): faster-whisper on this machine — needs ~1 GB
+    # RAM for the tiny model. "groq": Groq's hosted Whisper
+    # large-v3-turbo API — free plan, no card, word-level timestamps
+    # (see backend/pipeline/groq_transcribe.py). Groq is what makes the
+    # no-card Render free deploy work: with transcription offloaded,
+    # the backend only needs RAM for FastAPI + FFmpeg + OpenCV, which
+    # fits in 512 MB. Audio is sent to Groq's API in groq mode.
+    transcription_provider: str = field(default_factory=lambda: os.environ.get(
+        "TRANSCRIPTION_PROVIDER", "local").strip().lower())
+    groq_api_key: str = field(default_factory=lambda: os.environ.get(
+        "GROQ_API_KEY", ""))
+    groq_model: str = field(default_factory=lambda: os.environ.get(
+        "GROQ_MODEL", "whisper-large-v3-turbo"))
+    groq_base_url: str = field(default_factory=lambda: os.environ.get(
+        "GROQ_BASE_URL", "https://api.groq.com/openai/v1"))
+    # Long audio is split into chunks of at most this many seconds
+    # (and ~20 MB each) for Groq's 25 MB/file cap.
+    groq_max_chunk_seconds: int = field(
+        default_factory=lambda: _int("GROQ_MAX_CHUNK_SECONDS", 600))
+    # ── Render preset (x264) ────────────────────────────────────────────
+    # "veryfast" (default) is the quality/speed balance from Phase 1.
+    # It is also a MEMORY knob: at 1080x1920 the render child peaks at
+    # ~418 MB with "veryfast" but ~210 MB with "ultrafast" (measured
+    # 2026-11-16). The Render free deploy (512 MB) sets "ultrafast" so
+    # a job fits alongside the backend process; anything else keeps
+    # "veryfast". Unknown values fall back to "veryfast" — a typo must
+    # never reach FFmpeg as an invalid preset.
+    render_preset: str = field(default_factory=lambda: _render_preset())
+    # ── Face tracking ───────────────────────────────────────────────────
+    # On (default): YuNet face detection + smoothing per clip, so the
+    # 9:16 crop follows the speaker. It decodes video frames in-process
+    # and costs ~180 MB of peak RAM — the single biggest in-process
+    # cost. Off (FACE_TRACKING=0): the centre crop is used instead
+    # (the same fallback as "no face found"). The Render free deploy
+    # (512 MB) turns it off so a job fits next to the render child.
+    face_tracking: bool = field(
+        default_factory=lambda: _bool("FACE_TRACKING", True))
     clips_per_project: int = field(default_factory=lambda: _int("CLIPS_PER_PROJECT", 3))
     clip_min_seconds: int = field(default_factory=lambda: _int("CLIP_MIN_SECONDS", 15))
     clip_max_seconds: int = field(default_factory=lambda: _int("CLIP_MAX_SECONDS", 60))
